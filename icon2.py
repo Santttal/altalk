@@ -7,23 +7,35 @@ Push-to-talk по Left Alt + мониторинг папки для аудиоф
     python3 icon2.py
 """
 
+import asyncio
+import fcntl
 import io
 import json
 import math
 import queue
 import os
 import re
+import select
+import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+from collections import deque
 
 import numpy as np
-import pyperclip
 import sounddevice as sd
 import soundfile as sf
 from openai import OpenAI
 from evdev import InputDevice, ecodes, list_devices
+from dbus_fast import BusType, Message, MessageType, Variant
+from dbus_fast.aio import MessageBus
+from dbus_fast.service import PropertyAccess, ServiceInterface, dbus_property, method
+from dbus_fast.service import signal as dbus_signal
+from Xlib import X, Xatom
+from Xlib import display as xdisplay
+from Xlib.protocol import event as xevent
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -31,8 +43,33 @@ MIN_DURATION_SECONDS = 1.0
 TRANSCRIBE_QUEUE_SIZE = 8
 MODEL = "gpt-4o-mini-transcribe"
 PROMPT = "Задача в Jira. Деплой через docker compose. CI/CD pipeline, phpstan, cs-fixer, дейлик, services.yaml, deprecated."
-VOCABULARY_PATH = os.path.join(os.path.dirname(__file__), "vocabulary.json")
-ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.png")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))  # source checkout or the PyInstaller bundle
+ASSETS_DIR = os.path.join(APP_DIR, "assets")
+CONFIG_DIR = os.path.join(os.getenv("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "altalk")
+ENV_PATHS = [os.path.join(APP_DIR, ".env"), os.path.join(CONFIG_DIR, ".env")]
+VOCABULARY_PATHS = [os.path.join(APP_DIR, "vocabulary.json"), os.path.join(CONFIG_DIR, "vocabulary.json")]
+LOG_PATH = os.path.join(
+    os.getenv("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "altalk", "altalk.log"
+)
+ICON_PATH = os.path.join(ASSETS_DIR, "altalk-256.png")
+TRAY_ICON_NAME = "altalk-tray"
+COPIED_ICON_NAME = "altalk-copied"
+COPIED_FLASH_SECONDS = 1.2
+HISTORY_SIZE = 5
+HISTORY_PREVIEW_CHARS = 45
+LOCK_PATH = os.path.join(os.getenv("XDG_RUNTIME_DIR", tempfile.gettempdir()), "altalk.lock")
+SNI_WATCHER = "org.kde.StatusNotifierWatcher"
+DESKTOP_ENTRY = """\
+[Desktop Entry]
+Type=Application
+Name=Altalk
+Comment=Hold Left Alt, speak, get the text in the clipboard
+Exec={exec}
+Icon=altalk
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+"""
 DEFAULT_WATCH_DIRECTORY = "~/Downloads/icon_audio_inbox"
 WATCH_DIRECTORIES = [os.getenv("ICON_WATCH_DIR", DEFAULT_WATCH_DIRECTORY)]
 FILE_POLL_INTERVAL_SECONDS = 1.0
@@ -67,9 +104,10 @@ SUPPORTED_AUDIO_EXTENSIONS = {
 }
 
 
-def load_vocabulary(path=VOCABULARY_PATH):
+def load_vocabulary(paths=VOCABULARY_PATHS):
     global PROMPT
-    if not os.path.isfile(path):
+    path = next((p for p in paths if os.path.isfile(p)), None)
+    if path is None:
         return
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
@@ -81,8 +119,9 @@ load_vocabulary()
 
 
 def load_api_key():
-    env_path = os.path.join(os.path.dirname(__file__), ".env")
-    if os.path.isfile(env_path):
+    for env_path in ENV_PATHS:
+        if not os.path.isfile(env_path):
+            continue
         with open(env_path) as f:
             for line in f:
                 line = line.strip()
@@ -93,27 +132,110 @@ def load_api_key():
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key or api_key == "sk-your-key-here":
         raise RuntimeError(
-            "OPENAI_API_KEY not set. Put your key in .env file:\n"
+            f"OPENAI_API_KEY not set. Put your key in {ENV_PATHS[-1]}:\n"
             "  OPENAI_API_KEY=sk-..."
         )
     return api_key
 
 
+async def _notify(title, message):
+    bus = await MessageBus(bus_type=BusType.SESSION).connect()
+    try:
+        await bus.call(
+            Message(
+                destination="org.freedesktop.Notifications",
+                path="/org/freedesktop/Notifications",
+                interface="org.freedesktop.Notifications",
+                member="Notify",
+                signature="susssasa{sv}i",
+                body=["Altalk", 0, ICON_PATH, title, message, [], {}, -1],
+            )
+        )
+    finally:
+        bus.disconnect()
+
+
 def send_notification(title, message):
     try:
-        subprocess.run(
-            ["notify-send", "-i", ICON_PATH, title, message],
-            check=False,
-            timeout=5,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        asyncio.run(_notify(title, message))
     except Exception:
         pass
 
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+
+class X11Clipboard:
+    # Owns the CLIPBOARD selection the way xclip does; GNOME hands it over to Wayland apps.
+    def __init__(self):
+        self.display = xdisplay.Display()
+        self.window = self.display.screen().root.create_window(0, 0, 1, 1, 0, X.CopyFromParent)
+        self.selection = self.display.intern_atom("CLIPBOARD")
+        self.targets = self.display.intern_atom("TARGETS")
+        self.text_targets = [
+            self.display.intern_atom("UTF8_STRING"),
+            self.display.intern_atom("text/plain;charset=utf-8"),
+        ]
+        # Without the INCR protocol one property write must fit into a single X request.
+        self.max_bytes = self.display.display.info.max_request_length * 4 - 64
+        self.data = b""
+        self.wakeup_read, self.wakeup_write = os.pipe()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def copy(self, text):
+        data = text.encode("utf-8")
+        if len(data) > self.max_bytes:
+            log(f"Text is too long for the clipboard ({len(data)} bytes), not copied")
+            return
+        self.data = data
+        os.write(self.wakeup_write, b"\0")
+
+    def _serve(self):
+        # All X calls stay on this thread; copy() only wakes it up through the pipe.
+        while True:
+            readable, _, _ = select.select([self.display, self.wakeup_read], [], [])
+            if self.wakeup_read in readable:
+                os.read(self.wakeup_read, 64)
+                self.window.set_selection_owner(self.selection, X.CurrentTime)
+                self.display.flush()
+            while self.display.pending_events():
+                event = self.display.next_event()
+                if event.type == X.SelectionRequest:
+                    self._answer(event)
+
+    def _answer(self, request):
+        prop = request.property or request.target
+        if request.target == self.targets:
+            request.requestor.change_property(
+                prop, Xatom.ATOM, 32, [self.targets, *self.text_targets]
+            )
+        elif request.target in self.text_targets:
+            request.requestor.change_property(prop, request.target, 8, self.data)
+        else:
+            prop = X.NONE
+        request.requestor.send_event(
+            xevent.SelectionNotify(
+                time=request.time,
+                requestor=request.requestor,
+                selection=request.selection,
+                target=request.target,
+                property=prop,
+            )
+        )
+        self.display.flush()
+
+
+_clipboard = None
+_clipboard_lock = threading.Lock()
+
+
+def copy_to_clipboard(text):
+    global _clipboard
+    with _clipboard_lock:
+        if _clipboard is None:
+            _clipboard = X11Clipboard()
+    _clipboard.copy(text)
 
 
 def apply_corrections(text: str) -> str:
@@ -222,7 +344,7 @@ class OpenAITranscriber:
         rms = np.sqrt(np.mean(audio_data ** 2))
         if rms < 0.0025:
             log(f"Recording too quiet (rms={rms:.4f}). Skipping.")
-            send_notification("icon2", "Слишком тихо — проверьте микрофон/громкость")
+            send_notification("Altalk", "Слишком тихо — проверьте микрофон/громкость")
             return ""
 
         wav_buf = self._audio_to_wav_bytes(audio_data)
@@ -506,7 +628,7 @@ class DirectoryAudioEnqueuer:
                     log("Transcription queue is full. Dropping file path.")
 
 
-def transcription_worker(transcriber, in_queue):
+def transcription_worker(transcriber, in_queue, on_transcript=None):
     while True:
         payload = in_queue.get()
         try:
@@ -520,7 +642,9 @@ def transcription_worker(transcriber, in_queue):
                 text = ""
 
             if text:
-                pyperclip.copy(text)
+                copy_to_clipboard(text)
+                if on_transcript:
+                    on_transcript(text)
                 if source_type == "file":
                     txt_path = os.path.splitext(source_data)[0] + ".txt"
                     with open(txt_path, "w", encoding="utf-8") as f:
@@ -538,24 +662,334 @@ def transcription_worker(transcriber, in_queue):
             in_queue.task_done()
 
 
+def preview_text(text, limit=HISTORY_PREVIEW_CHARS):
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
+        return flat
+    return flat[:limit].rsplit(" ", 1)[0].rstrip(".,;:—–-") + "…"
+
+
+class StatusNotifierItem(ServiceInterface):
+    # The tray icon itself (StatusNotifierItem spec); GNOME shows it via the AppIndicator extension.
+    def __init__(self):
+        super().__init__("org.kde.StatusNotifierItem")
+        self.icon_name = TRAY_ICON_NAME
+
+    @dbus_property(access=PropertyAccess.READ)
+    def Category(self) -> "s":
+        return "ApplicationStatus"
+
+    @dbus_property(access=PropertyAccess.READ)
+    def Id(self) -> "s":
+        return "altalk"
+
+    @dbus_property(access=PropertyAccess.READ)
+    def Title(self) -> "s":
+        return "Altalk"
+
+    @dbus_property(access=PropertyAccess.READ)
+    def Status(self) -> "s":
+        return "Active"
+
+    @dbus_property(access=PropertyAccess.READ)
+    def IconName(self) -> "s":
+        return self.icon_name
+
+    @dbus_property(access=PropertyAccess.READ)
+    def IconThemePath(self) -> "s":
+        return ASSETS_DIR
+
+    @dbus_property(access=PropertyAccess.READ)
+    def ToolTip(self) -> "(sa(iiay)ss)":
+        return ["", [], "Altalk", "Зажми Left Alt и говори"]
+
+    @dbus_property(access=PropertyAccess.READ)
+    def ItemIsMenu(self) -> "b":
+        return True
+
+    @dbus_property(access=PropertyAccess.READ)
+    def Menu(self) -> "o":
+        return "/MenuBar"
+
+    @method()
+    def Activate(self, x: "i", y: "i"):
+        pass
+
+    @method()
+    def SecondaryActivate(self, x: "i", y: "i"):
+        pass
+
+    @method()
+    def ContextMenu(self, x: "i", y: "i"):
+        pass
+
+    @method()
+    def Scroll(self, delta: "i", orientation: "s"):
+        pass
+
+    @dbus_signal()
+    def NewIcon(self):
+        pass
+
+
+class DBusMenu(ServiceInterface):
+    # The tray menu (com.canonical.dbusmenu); the tray host renders it, items come from TrayIcon.
+    def __init__(self, tray):
+        super().__init__("com.canonical.dbusmenu")
+        self.tray = tray
+        self.revision = 1
+
+    @dbus_property(access=PropertyAccess.READ)
+    def Version(self) -> "u":
+        return 3
+
+    @dbus_property(access=PropertyAccess.READ)
+    def TextDirection(self) -> "s":
+        return "ltr"
+
+    @dbus_property(access=PropertyAccess.READ)
+    def Status(self) -> "s":
+        return "normal"
+
+    @dbus_property(access=PropertyAccess.READ)
+    def IconThemePath(self) -> "as":
+        return []
+
+    @method()
+    def GetLayout(self, parent_id: "i", recursion_depth: "i", property_names: "as") -> "u(ia{sv}av)":
+        items = self.tray.menu_items()
+        if parent_id != 0:
+            return [self.revision, [parent_id, dict(items).get(parent_id, {}), []]]
+        children = [Variant("(ia{sv}av)", [item_id, props, []]) for item_id, props in items]
+        return [self.revision, [0, {"children-display": Variant("s", "submenu")}, children]]
+
+    @method()
+    def GetGroupProperties(self, ids: "ai", property_names: "as") -> "a(ia{sv})":
+        items = dict(self.tray.menu_items())
+        return [[item_id, items[item_id]] for item_id in ids if item_id in items]
+
+    @method()
+    def GetProperty(self, item_id: "i", name: "s") -> "v":
+        return dict(self.tray.menu_items()).get(item_id, {}).get(name, Variant("s", ""))
+
+    @method()
+    def Event(self, item_id: "i", event_id: "s", data: "v", timestamp: "u"):
+        if event_id == "clicked":
+            self.tray.on_click(item_id)
+
+    @method()
+    def EventGroup(self, events: "a(isvu)") -> "ai":
+        for item_id, event_id, _data, _timestamp in events:
+            if event_id == "clicked":
+                self.tray.on_click(item_id)
+        return []
+
+    @method()
+    def AboutToShow(self, item_id: "i") -> "b":
+        return False
+
+    @method()
+    def AboutToShowGroup(self, ids: "ai") -> "aiai":
+        return [[], []]
+
+    @dbus_signal()
+    def LayoutUpdated(self) -> "ui":
+        return [self.revision, 0]
+
+
+class TrayIcon:
+    QUIT_ID = 1
+    EMPTY_ID = 2
+    SEPARATOR_ID = 3
+
+    def __init__(self):
+        self.history = deque(maxlen=HISTORY_SIZE)
+        self.history_lock = threading.Lock()
+        self.next_entry_id = 100
+        self.item = StatusNotifierItem()
+        self.menu = DBusMenu(self)
+        self.loop = None
+        self.quit_event = None
+        self.restore_icon_handle = None
+
+    def add_transcript(self, text):
+        # Called from the transcription worker thread; D-Bus objects live on the asyncio loop.
+        with self.history_lock:
+            self.history.appendleft((self.next_entry_id, time.strftime("%H:%M"), text))
+            self.next_entry_id += 1
+        if self.loop:
+            self.loop.call_soon_threadsafe(self._layout_changed)
+
+    def _layout_changed(self):
+        self.menu.revision += 1
+        self.menu.LayoutUpdated()
+
+    def menu_items(self):
+        with self.history_lock:
+            history = list(self.history)
+        items = []
+        if not history:
+            items.append(
+                (self.EMPTY_ID, {
+                    "label": Variant("s", "Пока нет транскрипций"),
+                    "enabled": Variant("b", False),
+                })
+            )
+        for entry_id, stamp, text in history:
+            # DBusMenu treats "_" as a mnemonic marker; "__" is a literal underscore.
+            label = f"{stamp}  {preview_text(text)}".replace("_", "__")
+            items.append(
+                (entry_id, {
+                    "label": Variant("s", label),
+                    "icon-name": Variant("s", "edit-copy-symbolic"),
+                })
+            )
+        items.append((self.SEPARATOR_ID, {"type": Variant("s", "separator")}))
+        items.append((self.QUIT_ID, {"label": Variant("s", "Выйти")}))
+        return items
+
+    def on_click(self, item_id):
+        if item_id == self.QUIT_ID:
+            self.quit_event.set()
+            return
+        with self.history_lock:
+            text = next((t for entry_id, _, t in self.history if entry_id == item_id), None)
+        if text is None:
+            return
+        copy_to_clipboard(text)
+        log(f"Copied from history: {preview_text(text)}")
+        self._set_icon(COPIED_ICON_NAME)
+        if self.restore_icon_handle:
+            self.restore_icon_handle.cancel()
+        self.restore_icon_handle = self.loop.call_later(
+            COPIED_FLASH_SECONDS, self._set_icon, TRAY_ICON_NAME
+        )
+
+    def _set_icon(self, name):
+        self.item.icon_name = name
+        self.item.NewIcon()
+
+    async def run(self):
+        self.loop = asyncio.get_running_loop()
+        self.quit_event = asyncio.Event()
+        try:
+            bus = await MessageBus(bus_type=BusType.SESSION).connect()
+            bus.export("/StatusNotifierItem", self.item)
+            bus.export("/MenuBar", self.menu)
+            name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
+            await bus.request_name(name)
+
+            def on_message(message):
+                # The tray host restarted (e.g. GNOME Shell reloaded the extension): register again.
+                if message.member == "NameOwnerChanged" and message.body[0] == SNI_WATCHER and message.body[2]:
+                    self.loop.create_task(self._register(bus, name))
+
+            bus.add_message_handler(on_message)
+            await bus.call(
+                Message(
+                    destination="org.freedesktop.DBus",
+                    path="/org/freedesktop/DBus",
+                    interface="org.freedesktop.DBus",
+                    member="AddMatch",
+                    signature="s",
+                    body=[f"type='signal',member='NameOwnerChanged',arg0='{SNI_WATCHER}'"],
+                )
+            )
+            await self._register(bus, name)
+        except Exception as e:
+            log(f"Tray icon unavailable: {e}")
+        await self.quit_event.wait()
+
+    async def _register(self, bus, name):
+        reply = await bus.call(
+            Message(
+                destination=SNI_WATCHER,
+                path="/StatusNotifierWatcher",
+                interface=SNI_WATCHER,
+                member="RegisterStatusNotifierItem",
+                signature="s",
+                body=[name],
+            )
+        )
+        if reply.message_type == MessageType.ERROR:
+            log(f"No tray host ({reply.error_name}); on GNOME enable the AppIndicator extension")
+        else:
+            log("Tray icon registered")
+
+
+def install_desktop_entry():
+    data_home = os.getenv("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    icon_dir = os.path.join(data_home, "icons", "hicolor", "256x256", "apps")
+    apps_dir = os.path.join(data_home, "applications")
+    os.makedirs(icon_dir, exist_ok=True)
+    os.makedirs(apps_dir, exist_ok=True)
+    shutil.copyfile(ICON_PATH, os.path.join(icon_dir, "altalk.png"))
+    if getattr(sys, "frozen", False):
+        command = sys.executable
+    else:
+        command = f"{sys.executable} {os.path.abspath(__file__)}"
+    entry_path = os.path.join(apps_dir, "altalk.desktop")
+    with open(entry_path, "w") as f:
+        f.write(DESKTOP_ENTRY.format(exec=command))
+    print(f"Installed {entry_path}")
+
+
+def redirect_output_to_log():
+    # Started from the app menu there is no terminal, so keep the log in the XDG state dir.
+    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+    log_file = open(LOG_PATH, "a")
+    os.dup2(log_file.fileno(), sys.stdout.fileno())
+    os.dup2(log_file.fileno(), sys.stderr.fileno())
+    sys.stdout.reconfigure(line_buffering=True)
+
+
+def acquire_instance_lock():
+    lock_file = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        send_notification("Altalk", "Уже запущен — иконка в трее")
+        raise SystemExit("Altalk is already running")
+    return lock_file
+
+
 def main():
-    api_key = load_api_key()
+    if sys.argv[1:] == ["--install"]:
+        install_desktop_entry()
+        return
+    if getattr(sys, "frozen", False) and not sys.stdout.isatty():
+        redirect_output_to_log()
+
+    instance_lock = acquire_instance_lock()  # held until the process exits
+    try:
+        api_key = load_api_key()
+    except RuntimeError as e:
+        send_notification("Altalk", f"Нет ключа OpenAI: впиши OPENAI_API_KEY в {ENV_PATHS[-1]}")
+        raise SystemExit(str(e))
     transcriber = OpenAITranscriber(api_key)
     transcribe_queue = queue.Queue(maxsize=TRANSCRIBE_QUEUE_SIZE)
     recorder = PushToTalkRecorder(transcribe_queue)
-    file_enqueuer = DirectoryAudioEnqueuer(transcribe_queue)
+    tray = TrayIcon()
 
     threading.Thread(
         target=transcription_worker,
-        args=(transcriber, transcribe_queue),
+        args=(transcriber, transcribe_queue, tray.add_transcript),
         daemon=True,
     ).start()
 
     threading.Thread(target=recorder.record_audio, daemon=True).start()
-    threading.Thread(target=file_enqueuer.run, daemon=True).start()
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        file_enqueuer = DirectoryAudioEnqueuer(transcribe_queue)
+        threading.Thread(target=file_enqueuer.run, daemon=True).start()
+        log(f"To add external audio while running, put file into: {DEFAULT_WATCH_DIRECTORY}")
+    else:
+        log("ffmpeg/ffprobe not found: audio-file inbox disabled")
 
     initial = find_keyboard_devices()
     if not initial:
+        send_notification(
+            "Altalk", "Нет доступа к клавиатуре: sudo usermod -aG input $USER и перелогиниться"
+        )
         raise SystemExit(
             "No accessible keyboard devices found in /dev/input/. "
             "Ensure your user is in the 'input' group: sudo usermod -aG input $USER"
@@ -566,10 +1000,11 @@ def main():
         except Exception:
             pass
 
+    threading.Thread(target=keyboard_supervisor, args=(recorder,), daemon=True).start()
     log("Ready. Hold Left Alt to record.")
-    log(f"To add external audio while running, put file into: {DEFAULT_WATCH_DIRECTORY}")
-
-    keyboard_supervisor(recorder)
+    asyncio.run(tray.run())
+    log("Quit from tray")
+    instance_lock.close()
 
 
 if __name__ == "__main__":

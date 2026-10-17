@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 .idea/workspace.xml
 vocabulary.json
+build/
+dist/

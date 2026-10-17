@@ -4,35 +4,50 @@
 
 *Зажми Left Alt и говори → отпусти → вставляй текст через `Ctrl+V`.*
 
-**Alt + talk**: голос → текст через OpenAI API (`gpt-4o-mini-transcribe`, ~$0.003/мин).
-Скрипт `icon2.py`, Linux.
+**Alt + talk**: голос → текст через OpenAI API (`gpt-4o-mini-transcribe`, ~$0.003/мин). Linux.
 
 - **Push-to-talk**: держишь Left Alt — пишет микрофон, отпустил — текст в буфер обмена
   + уведомление. Нажатие любой другой клавиши при зажатом Alt отменяет запись.
-- `PROMPT` — доменные термины для API, `CORRECTIONS` — regex-правки после распознавания.
-  Свои термины — в `vocabulary.json` рядом со скриптом (не в git, образец —
-  `vocabulary.example.json`): `prompt` заменяет `PROMPT`, `corrections` дополняют `CORRECTIONS`.
+- **Трей**: в меню иконки — 5 последних транскрипций (время + начало текста). Клик по
+  любой копирует её текст в буфер обмена, иконка в трее на секунду становится галочкой.
+  «Выйти» закрывает приложение.
+- **Свои термины**: `~/.config/altalk/vocabulary.json` (образец — `vocabulary.example.json`):
+  `prompt` — подсказка для распознавания, `corrections` — regex-правки после него.
 
 ## Установка
 
+`altalk` — один исполняемый файл: Python и все библиотеки внутри, системные пакеты не нужны.
+
 ```bash
-python3 -m pip install -r requirements.txt   # системный python3 (3.10)
-cp .env.example .env                         # и вписать OPENAI_API_KEY
-cp vocabulary.example.json vocabulary.json   # опционально: свои термины
+sudo apt install ./altalk_0.1.0_amd64.deb      # как пакет: меню приложений, /usr/bin/altalk
+# или без установки — скопировать файл и запустить:
+cp altalk ~/.local/bin/ && altalk --install    # --install добавляет Altalk в меню приложений
 ```
 
-Нужны `ffmpeg`/`ffprobe`, `notify-send`, пользователь в группе `input`
-(клавиатура читается через evdev): `sudo usermod -aG input $USER`.
+Один раз:
+
+```bash
+mkdir -p ~/.config/altalk && echo 'OPENAI_API_KEY=sk-...' > ~/.config/altalk/.env
+sudo usermod -aG input $USER   # Alt читается из /dev/input; после этого перелогиниться
+```
+
+Иконку в трее на GNOME показывает расширение AppIndicator (в Ubuntu включено по умолчанию),
+в KDE — штатно. Нужна glibc 2.39+ (Ubuntu 24.04 и новее); проверено на Ubuntu 24.04, GNOME, Wayland.
 
 ## Запуск
 
-```bash
-python3 icon2.py                                   # в терминале
+Из меню приложений — **Altalk**, или `altalk` в терминале. Закрыть — «Выйти» в меню трея.
+Второй экземпляр не запустится — покажет уведомление «Уже запущен».
+Лог: `~/.local/state/altalk/altalk.log`.
 
-# в фоне, лог в icon2.log (абсолютный путь — чтобы находился через pkill -f)
-D=~/projects/ai/voice-transcriber
-setsid python3 -u $D/icon2.py >> $D/icon2.log 2>&1 </dev/null &
+## Сборка
+
+```bash
+./packaging/build.sh   # → dist/altalk и dist/altalk_0.1.0_amd64.deb
 ```
 
-Перезапуск после правок: `pkill -f voice-transcriber/icon2.py`, затем снова команда выше.
-Должен работать ровно один экземпляр.
+Скрипт сам создаёт `build/venv` и ставит туда зависимости и PyInstaller. На машине сборки
+нужен `libportaudio2` — он вкладывается внутрь `altalk`.
+
+Из исходников без сборки: `python3 -m pip install -r requirements.txt`, ключ в `.env` рядом
+со скриптом (`cp .env.example .env`), затем `python3 icon2.py`.
