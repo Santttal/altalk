@@ -27,7 +27,10 @@ from collections import deque
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
-from openai import OpenAI
+from openai import (
+    APIConnectionError, APIError, APIStatusError, APITimeoutError,
+    AuthenticationError, OpenAI, RateLimitError,
+)
 from evdev import InputDevice, ecodes, list_devices
 from dbus_fast import BusType, Message, MessageType, Variant
 from dbus_fast.aio import MessageBus
@@ -62,6 +65,11 @@ COPIED_ICON_NAME = "altalk-copied"
 COPIED_FLASH_SECONDS = 1.2
 HISTORY_SIZE = 5
 HISTORY_PREVIEW_CHARS = 45
+HISTORY_ICONS = {
+    "done": "edit-copy-symbolic",
+    "failed": "dialog-error-symbolic",
+    "empty": "dialog-information-symbolic",
+}
 LOCK_PATH = os.path.join(os.getenv("XDG_RUNTIME_DIR", tempfile.gettempdir()), "altalk.lock")
 SNI_WATCHER = "org.kde.StatusNotifierWatcher"
 DESKTOP_ENTRY = """\
@@ -86,6 +94,7 @@ CHUNK_OVERLAP_SECONDS = 4.0
 TRANSCODE_BITRATE = "64k"
 REQUEST_TIMEOUT_SECONDS = 120.0
 MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 1.0
 
 CORRECTIONS = {
     r"\bджира\b": "Jira",
@@ -386,6 +395,51 @@ def stitch_transcripts(parts):
     return " ".join(result_words)
 
 
+class MissingApiKeyError(RuntimeError):
+    pass
+
+
+def is_retryable(error):
+    # The same rule the OpenAI SDK uses for its own retries.
+    if isinstance(error, APIConnectionError):
+        return True
+    if not isinstance(error, APIStatusError):
+        return False
+    should_retry = error.response.headers.get("x-should-retry")
+    if should_retry in ("true", "false"):
+        return should_retry == "true"
+    return error.status_code in (408, 409, 429) or error.status_code >= 500
+
+
+def describe_error(error):
+    # A few words for the tray menu; the log keeps the full message.
+    if isinstance(error, MissingApiKeyError):
+        return "нет ключа OpenAI"
+    if isinstance(error, APITimeoutError):
+        return "таймаут"
+    if isinstance(error, APIConnectionError):
+        return "нет связи"
+    if isinstance(error, AuthenticationError):
+        return "неверный ключ"
+    if isinstance(error, RateLimitError):
+        return "нет денег на счёте" if error.code == "insufficient_quota" else "лимит запросов"
+    if isinstance(error, APIStatusError):
+        return f"OpenAI ответил {error.status_code}"
+    return preview_text(str(error) or type(error).__name__, 30)
+
+
+class Transcription:
+    # A recording or audio file on its way through the queue; the tray menu shows its state.
+    def __init__(self, source_type, source_data):
+        self.source_type = source_type
+        self.source_data = source_data
+        self.stamp = time.strftime("%H:%M")
+        self.state = "queued"  # queued → running → done | failed | empty
+        self.attempt = 0
+        self.error = ""
+        self.text = ""
+
+
 class OpenAITranscriber:
     def __init__(self, api_key, model=None):
         self.configure(api_key, model)
@@ -397,21 +451,22 @@ class OpenAITranscriber:
             self.client = None
             log(f"OpenAI transcriber waiting for an API key (model: {self.model})")
             return
+        # Retries are ours (see _request), not the SDK's, so the tray can show the attempt.
         self.client = OpenAI(
             api_key=api_key,
             timeout=REQUEST_TIMEOUT_SECONDS,
-            max_retries=MAX_RETRIES,
+            max_retries=0,
         )
         log(
             f"OpenAI transcriber ready (model: {self.model}, "
             f"timeout: {REQUEST_TIMEOUT_SECONDS:.0f}s, retries: {MAX_RETRIES})"
         )
 
-    def _has_client(self):
+    def _require_client(self):
         if self.client is None:
             log("OPENAI_API_KEY not set, skipping transcription")
             send_notification("Altalk", "Нет ключа OpenAI — открой «Настройки…» в меню трея")
-        return self.client is not None
+            raise MissingApiKeyError("OPENAI_API_KEY not set")
 
     def _audio_to_wav_bytes(self, audio_array):
         buf = io.BytesIO()
@@ -420,41 +475,46 @@ class OpenAITranscriber:
         buf.name = "audio.wav"
         return buf
 
-    def transcribe_array(self, audio_data):
-        rms = np.sqrt(np.mean(audio_data ** 2))
-        if rms < 0.0025:
-            log(f"Recording too quiet (rms={rms:.4f}). Skipping.")
-            send_notification("Altalk", "Слишком тихо — проверьте микрофон/громкость")
-            return ""
-        if not self._has_client():
-            return ""
+    def _request(self, audio_file, on_attempt=None):
+        # on_attempt(attempt, previous_error) runs before every request, starting from 1.
+        error = None
+        for attempt in range(1, MAX_RETRIES + 2):
+            if on_attempt:
+                on_attempt(attempt, error)
+            audio_file.seek(0)
+            started = time.monotonic()
+            try:
+                response = self.client.audio.transcriptions.create(
+                    model=self.model,
+                    file=audio_file,
+                    language="ru",
+                    prompt=PROMPT,
+                )
+            except APIError as e:
+                if attempt > MAX_RETRIES or not is_retryable(e):
+                    raise
+                error = e
+                delay = RETRY_DELAY_SECONDS * 2 ** (attempt - 1)
+                log(
+                    f"  Attempt {attempt} failed after {time.monotonic() - started:.1f}s: {e}; "
+                    f"retrying in {delay:.0f}s"
+                )
+                time.sleep(delay)
+                continue
+            log(f"  API call took {time.monotonic() - started:.1f}s")
+            return response.text
 
-        wav_buf = self._audio_to_wav_bytes(audio_data)
-        started = time.monotonic()
-        response = self.client.audio.transcriptions.create(
-            model=self.model,
-            file=wav_buf,
-            language="ru",
-            prompt=PROMPT,
-        )
-        log(f"  API call took {time.monotonic() - started:.1f}s")
-        return apply_corrections(response.text.strip())
+    def transcribe_array(self, audio_data, on_attempt=None):
+        self._require_client()
+        text = self._request(self._audio_to_wav_bytes(audio_data), on_attempt)
+        return apply_corrections(text.strip())
 
-    def _transcribe_path(self, path):
-        started = time.monotonic()
+    def _transcribe_path(self, path, on_attempt=None):
         with open(path, "rb") as f:
-            response = self.client.audio.transcriptions.create(
-                model=self.model,
-                file=f,
-                language="ru",
-                prompt=PROMPT,
-            )
-        log(f"  API call took {time.monotonic() - started:.1f}s")
-        return response.text
+            return self._request(f, on_attempt)
 
-    def transcribe_file(self, audio_path):
-        if not self._has_client():
-            return ""
+    def transcribe_file(self, audio_path, on_attempt=None):
+        self._require_client()
         size_mb = os.path.getsize(audio_path) / (1024 * 1024)
         log(f"Processing {audio_path} ({size_mb:.1f} MB)")
         with tempfile.TemporaryDirectory(prefix="icon2_") as tmpdir:
@@ -471,7 +531,7 @@ class OpenAITranscriber:
                 and duration <= MAX_CHUNK_DURATION_SECONDS
             ):
                 log("Single-request upload")
-                return apply_corrections(self._transcribe_path(transcoded).strip())
+                return apply_corrections(self._transcribe_path(transcoded, on_attempt).strip())
 
             chunks = split_audio(
                 transcoded, duration, MAX_UPLOAD_BYTES,
@@ -485,14 +545,14 @@ class OpenAITranscriber:
             for idx, chunk in enumerate(chunks, 1):
                 chunk_mb = os.path.getsize(chunk) / (1024 * 1024)
                 log(f"Chunk {idx}/{len(chunks)} ({chunk_mb:.1f} MB)")
-                parts.append(self._transcribe_path(chunk))
+                parts.append(self._transcribe_path(chunk, on_attempt))
             stitched = stitch_transcripts(parts)
             return apply_corrections(stitched.strip())
 
 
 class PushToTalkRecorder:
-    def __init__(self, out_queue):
-        self.out_queue = out_queue
+    def __init__(self, submit):
+        self.submit = submit
         self.recording = False
         self.aborted = False
         self.audio_buffer = []
@@ -532,8 +592,15 @@ class PushToTalkRecorder:
             log("Recording duration less than 1 second. Discarding recording.")
             return
 
+        # Checked here, not in the worker: no need to wait behind a slow request to say so.
+        rms = np.sqrt(np.mean(audio_data ** 2))
+        if rms < 0.0025:
+            log(f"Recording too quiet (rms={rms:.4f}). Skipping.")
+            send_notification("Altalk", "Слишком тихо — проверьте микрофон/громкость")
+            return
+
         try:
-            self.out_queue.put_nowait(("array", audio_data))
+            self.submit(Transcription("array", audio_data))
         except queue.Full:
             log("Transcription queue is full. Dropping recording.")
 
@@ -630,8 +697,8 @@ def keyboard_supervisor(recorder):
 
 
 class DirectoryAudioEnqueuer:
-    def __init__(self, out_queue, watch_directories=None):
-        self.out_queue = out_queue
+    def __init__(self, submit, watch_directories=None):
+        self.submit = submit
         directories = watch_directories or WATCH_DIRECTORIES
         self.watch_directories = [
             os.path.abspath(os.path.expanduser(path)) for path in directories
@@ -703,7 +770,7 @@ class DirectoryAudioEnqueuer:
                     continue
 
                 try:
-                    self.out_queue.put_nowait(("file", audio_path))
+                    self.submit(Transcription("file", audio_path))
                     self.processed_signatures.add(signature)
                     self.file_sizes.pop(audio_path, None)
                     self.stable_pass_counts.pop(audio_path, None)
@@ -712,25 +779,30 @@ class DirectoryAudioEnqueuer:
                     log("Transcription queue is full. Dropping file path.")
 
 
-def transcription_worker(transcriber, in_queue, on_transcript=None):
+def transcription_worker(transcriber, in_queue, on_update=lambda job: None):
+    # on_update(job) runs in this thread after every change of job.state or job.attempt.
     while True:
-        payload = in_queue.get()
+        job = in_queue.get()
+
+        def on_attempt(attempt, error):
+            job.attempt = attempt
+            job.error = describe_error(error) if error else ""
+            on_update(job)
+
         try:
-            source_type, source_data = payload
-            if source_type == "array":
-                text = transcriber.transcribe_array(source_data)
-            elif source_type == "file":
-                text = transcriber.transcribe_file(source_data)
+            job.state, job.attempt = "running", 0
+            on_update(job)
+            if job.source_type == "array":
+                text = transcriber.transcribe_array(job.source_data, on_attempt)
             else:
-                log(f"Unknown payload type: {source_type}")
-                text = ""
+                text = transcriber.transcribe_file(job.source_data, on_attempt)
 
             if text:
+                job.state, job.text = "done", text
+                on_update(job)
                 copy_to_clipboard(text)
-                if on_transcript:
-                    on_transcript(text)
-                if source_type == "file":
-                    txt_path = os.path.splitext(source_data)[0] + ".txt"
+                if job.source_type == "file":
+                    txt_path = os.path.splitext(job.source_data)[0] + ".txt"
                     with open(txt_path, "w", encoding="utf-8") as f:
                         f.write(text)
                     log(f"Transcription saved: {txt_path}")
@@ -739,11 +811,35 @@ def transcription_worker(transcriber, in_queue, on_transcript=None):
                 preview = stripped[:40] + "..." if len(stripped) > 40 else stripped
                 send_notification("Transcription Complete", preview)
             else:
+                job.state = "empty"
+                on_update(job)
                 log("Transcription returned empty text.")
         except Exception as e:
             log(f"Transcription failed: {e}")
+            if job.state != "done":
+                job.state, job.error = "failed", describe_error(e)
+                on_update(job)
         finally:
             in_queue.task_done()
+
+
+def job_status(job):
+    # The part of a tray history entry after the time.
+    if job.state == "done":
+        return preview_text(job.text)
+    if job.state == "failed":
+        status = f"Ошибка: {job.error} — повторить"
+    elif job.state == "empty":
+        status = "ничего не распознано"
+    elif job.state == "queued":
+        status = "в очереди"
+    elif job.attempt > 1:
+        status = f"попытка {job.attempt} из {MAX_RETRIES + 1}: {job.error}"
+    else:
+        status = "распознаю…"
+    if job.source_type == "file":
+        return f"{os.path.basename(job.source_data)} — {status}"
+    return status
 
 
 def preview_text(text, limit=HISTORY_PREVIEW_CHARS):
@@ -887,7 +983,8 @@ class TrayIcon:
     SEPARATOR_ID = 3
     SETTINGS_ID = 4
 
-    def __init__(self, on_settings_saved=None):
+    def __init__(self, transcribe_queue, on_settings_saved=None):
+        self.transcribe_queue = transcribe_queue
         self.history = deque(maxlen=HISTORY_SIZE)
         self.history_lock = threading.Lock()
         self.next_entry_id = 100
@@ -900,13 +997,29 @@ class TrayIcon:
         self.settings_task = None
         self.settings_process = None
 
-    def add_transcript(self, text):
-        # Called from the transcription worker thread; D-Bus objects live on the asyncio loop.
+    def submit(self, job):
+        # Queues a new recording or file and lists it; raises queue.Full like put_nowait.
+        self.transcribe_queue.put_nowait(job)
         with self.history_lock:
-            self.history.appendleft((self.next_entry_id, time.strftime("%H:%M"), text))
+            self.history.appendleft((self.next_entry_id, job))
             self.next_entry_id += 1
+        self.update(job)
+
+    def update(self, job):
+        # Called from worker threads; D-Bus objects live on the asyncio loop.
         if self.loop:
             self.loop.call_soon_threadsafe(self._layout_changed)
+
+    def _retry(self, job):
+        job.state = "queued"
+        try:
+            self.transcribe_queue.put_nowait(job)
+        except queue.Full:
+            job.state = "failed"
+            log("Transcription queue is full. Not retrying.")
+            return
+        log(f"Retrying transcription from {job.stamp}")
+        self._layout_changed()
 
     def _layout_changed(self):
         self.menu.revision += 1
@@ -923,13 +1036,15 @@ class TrayIcon:
                     "enabled": Variant("b", False),
                 })
             )
-        for entry_id, stamp, text in history:
+        for entry_id, job in history:
             # DBusMenu treats "_" as a mnemonic marker; "__" is a literal underscore.
-            label = f"{stamp}  {preview_text(text)}".replace("_", "__")
+            label = f"{job.stamp}  {job_status(job)}".replace("_", "__")
             items.append(
                 (entry_id, {
                     "label": Variant("s", label),
-                    "icon-name": Variant("s", "edit-copy-symbolic"),
+                    "icon-name": Variant("s", HISTORY_ICONS.get(job.state, "content-loading-symbolic")),
+                    # Done copies the text again, failed retries; the rest is still in work.
+                    "enabled": Variant("b", job.state in ("done", "failed")),
                 })
             )
         items.append((self.SEPARATOR_ID, {"type": Variant("s", "separator")}))
@@ -945,9 +1060,13 @@ class TrayIcon:
             self.open_settings()
             return
         with self.history_lock:
-            text = next((t for entry_id, _, t in self.history if entry_id == item_id), None)
-        if text is None:
+            job = next((j for entry_id, j in self.history if entry_id == item_id), None)
+        if job and job.state == "failed":
+            self._retry(job)
             return
+        if not job or job.state != "done":
+            return
+        text = job.text
         copy_to_clipboard(text)
         log(f"Copied from history: {preview_text(text)}")
         self._set_icon(COPIED_ICON_NAME)
@@ -1103,7 +1222,6 @@ def main():
         log("OPENAI_API_KEY not set: opening settings")
     transcriber = OpenAITranscriber(api_key)
     transcribe_queue = queue.Queue(maxsize=TRANSCRIBE_QUEUE_SIZE)
-    recorder = PushToTalkRecorder(transcribe_queue)
 
     def reload_settings():
         try:
@@ -1111,17 +1229,18 @@ def main():
         except RuntimeError:
             transcriber.configure(None)
 
-    tray = TrayIcon(on_settings_saved=reload_settings)
+    tray = TrayIcon(transcribe_queue, on_settings_saved=reload_settings)
+    recorder = PushToTalkRecorder(tray.submit)
 
     threading.Thread(
         target=transcription_worker,
-        args=(transcriber, transcribe_queue, tray.add_transcript),
+        args=(transcriber, transcribe_queue, tray.update),
         daemon=True,
     ).start()
 
     threading.Thread(target=recorder.record_audio, daemon=True).start()
     if shutil.which("ffmpeg") and shutil.which("ffprobe"):
-        file_enqueuer = DirectoryAudioEnqueuer(transcribe_queue)
+        file_enqueuer = DirectoryAudioEnqueuer(tray.submit)
         threading.Thread(target=file_enqueuer.run, daemon=True).start()
         log(f"To add external audio while running, put file into: {DEFAULT_WATCH_DIRECTORY}")
     else:
