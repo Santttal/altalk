@@ -14,6 +14,8 @@ venv="$build/venv"
 
 portaudio=$(ldconfig -p | awk '/libportaudio\.so\.2 /{print $NF; exit}')
 [ -n "$portaudio" ] || { echo "libportaudio2 is needed on the build machine" >&2; exit 1; }
+"$venv/bin/python" -c "import tkinter" 2>/dev/null \
+    || { echo "tkinter is needed on the build machine: sudo apt install python3-tk" >&2; exit 1; }
 
 "$venv/bin/pyinstaller" --noconfirm --clean --onefile --name altalk \
     --distpath "$dist" --workpath "$build/pyinstaller" --specpath "$build" \

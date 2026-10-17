@@ -11,6 +11,9 @@
 - **Трей**: в меню иконки — 5 последних транскрипций (время + начало текста). Клик по
   любой копирует её текст в буфер обмена, иконка в трее на секунду становится галочкой.
   «Выйти» закрывает приложение.
+- **Настройки…** в меню трея: ключ OpenAI и модель распознавания (`gpt-4o-mini-transcribe` —
+  по умолчанию, `gpt-4o-transcribe`, `gpt-transcribe`, `whisper-1`). Ключ проверяется при
+  сохранении, применяется сразу, без перезапуска.
 - **Свои термины**: `~/.config/altalk/vocabulary.json` (образец — `vocabulary.example.json`):
   `prompt` — подсказка для распознавания, `corrections` — regex-правки после него.
 
@@ -24,10 +27,10 @@ sudo apt install ./altalk_0.1.0_amd64.deb      # как пакет: меню п�
 cp altalk ~/.local/bin/ && altalk --install    # --install добавляет Altalk в меню приложений
 ```
 
-Один раз:
+При первом запуске откроются настройки — вставь ключ OpenAI (хранится в
+`~/.config/altalk/.env`). И один раз дай доступ к клавиатуре:
 
 ```bash
-mkdir -p ~/.config/altalk && echo 'OPENAI_API_KEY=sk-...' > ~/.config/altalk/.env
 sudo usermod -aG input $USER   # Alt читается из /dev/input; после этого перелогиниться
 ```
 
@@ -47,7 +50,8 @@ sudo usermod -aG input $USER   # Alt читается из /dev/input; посл�
 ```
 
 Скрипт сам создаёт `build/venv` и ставит туда зависимости и PyInstaller. На машине сборки
-нужен `libportaudio2` — он вкладывается внутрь `altalk`.
+нужны `libportaudio2` и `python3-tk` — они вкладываются внутрь `altalk`, пользователям их
+ставить не надо.
 
 Из исходников без сборки: `python3 -m pip install -r requirements.txt`, ключ в `.env` рядом
 со скриптом (`cp .env.example .env`), затем `python3 icon2.py`.

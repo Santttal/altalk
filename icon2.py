@@ -27,7 +27,7 @@ from collections import deque
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
-from openai import OpenAI
+from openai import APIConnectionError, AuthenticationError, NotFoundError, OpenAI, PermissionDeniedError
 from evdev import InputDevice, ecodes, list_devices
 from dbus_fast import BusType, Message, MessageType, Variant
 from dbus_fast.aio import MessageBus
@@ -42,6 +42,8 @@ CHANNELS = 1
 MIN_DURATION_SECONDS = 1.0
 TRANSCRIBE_QUEUE_SIZE = 8
 MODEL = "gpt-4o-mini-transcribe"
+MODEL_SETTING = "ALTALK_MODEL"
+TRANSCRIBE_MODELS = ["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe", "whisper-1"]
 PROMPT = "Задача в Jira. Деплой через docker compose. CI/CD pipeline, phpstan, cs-fixer, дейлик, services.yaml, deprecated."
 APP_DIR = os.path.dirname(os.path.abspath(__file__))  # source checkout or the PyInstaller bundle
 ASSETS_DIR = os.path.join(APP_DIR, "assets")
@@ -69,6 +71,7 @@ Icon=altalk
 Terminal=false
 Categories=Utility;
 StartupNotify=false
+StartupWMClass=Altalk
 """
 DEFAULT_WATCH_DIRECTORY = "~/Downloads/icon_audio_inbox"
 WATCH_DIRECTORIES = [os.getenv("ICON_WATCH_DIR", DEFAULT_WATCH_DIRECTORY)]
@@ -118,18 +121,50 @@ def load_vocabulary(paths=VOCABULARY_PATHS):
 load_vocabulary()
 
 
-def load_api_key():
-    for env_path in ENV_PATHS:
-        if not os.path.isfile(env_path):
-            continue
-        with open(env_path) as f:
+def read_env_file(path):
+    values = {}
+    if os.path.isfile(path):
+        with open(path) as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     key, _, value = line.partition("=")
-                    os.environ.setdefault(key.strip(), value.strip())
+                    values[key.strip()] = value.strip()
+    return values
 
-    api_key = os.environ.get("OPENAI_API_KEY")
+
+def read_settings():
+    # The process environment is only a fallback; the first .env in ENV_PATHS wins over the rest.
+    settings = {
+        key: os.environ[key] for key in ("OPENAI_API_KEY", MODEL_SETTING) if os.environ.get(key)
+    }
+    for path in reversed(ENV_PATHS):
+        settings.update(read_env_file(path))
+    return settings
+
+
+def save_settings(values):
+    # Update the .env the app actually reads; realpath keeps a symlinked .env a symlink.
+    path = os.path.realpath(next((p for p in ENV_PATHS if os.path.isfile(p)), ENV_PATHS[-1]))
+    lines = []
+    if os.path.isfile(path):
+        with open(path) as f:
+            lines = f.read().splitlines()
+    pending = dict(values)
+    for i, line in enumerate(lines):
+        key = line.partition("=")[0].strip()
+        if "=" in line and not line.lstrip().startswith("#") and key in pending:
+            lines[i] = f"{key}={pending.pop(key)}"
+    lines.extend(f"{key}={value}" for key, value in pending.items())
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = path + ".tmp"
+    with open(os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp_path, path)
+
+
+def load_api_key():
+    api_key = read_settings().get("OPENAI_API_KEY")
     if not api_key or api_key == "sk-your-key-here":
         raise RuntimeError(
             f"OPENAI_API_KEY not set. Put your key in {ENV_PATHS[-1]}:\n"
@@ -322,16 +357,31 @@ def stitch_transcripts(parts):
 
 
 class OpenAITranscriber:
-    def __init__(self, api_key):
+    def __init__(self, api_key, model=None):
+        self.configure(api_key, model)
+
+    def configure(self, api_key, model=None):
+        # Also called by the tray after the settings window saved a new key or model.
+        self.model = model or read_settings().get(MODEL_SETTING) or MODEL
+        if not api_key:
+            self.client = None
+            log(f"OpenAI transcriber waiting for an API key (model: {self.model})")
+            return
         self.client = OpenAI(
             api_key=api_key,
             timeout=REQUEST_TIMEOUT_SECONDS,
             max_retries=MAX_RETRIES,
         )
         log(
-            f"OpenAI transcriber ready (model: {MODEL}, "
+            f"OpenAI transcriber ready (model: {self.model}, "
             f"timeout: {REQUEST_TIMEOUT_SECONDS:.0f}s, retries: {MAX_RETRIES})"
         )
+
+    def _has_client(self):
+        if self.client is None:
+            log("OPENAI_API_KEY not set, skipping transcription")
+            send_notification("Altalk", "Нет ключа OpenAI — открой «Настройки…» в меню трея")
+        return self.client is not None
 
     def _audio_to_wav_bytes(self, audio_array):
         buf = io.BytesIO()
@@ -346,11 +396,13 @@ class OpenAITranscriber:
             log(f"Recording too quiet (rms={rms:.4f}). Skipping.")
             send_notification("Altalk", "Слишком тихо — проверьте микрофон/громкость")
             return ""
+        if not self._has_client():
+            return ""
 
         wav_buf = self._audio_to_wav_bytes(audio_data)
         started = time.monotonic()
         response = self.client.audio.transcriptions.create(
-            model=MODEL,
+            model=self.model,
             file=wav_buf,
             language="ru",
             prompt=PROMPT,
@@ -362,7 +414,7 @@ class OpenAITranscriber:
         started = time.monotonic()
         with open(path, "rb") as f:
             response = self.client.audio.transcriptions.create(
-                model=MODEL,
+                model=self.model,
                 file=f,
                 language="ru",
                 prompt=PROMPT,
@@ -371,6 +423,8 @@ class OpenAITranscriber:
         return response.text
 
     def transcribe_file(self, audio_path):
+        if not self._has_client():
+            return ""
         size_mb = os.path.getsize(audio_path) / (1024 * 1024)
         log(f"Processing {audio_path} ({size_mb:.1f} MB)")
         with tempfile.TemporaryDirectory(prefix="icon2_") as tmpdir:
@@ -801,8 +855,9 @@ class TrayIcon:
     QUIT_ID = 1
     EMPTY_ID = 2
     SEPARATOR_ID = 3
+    SETTINGS_ID = 4
 
-    def __init__(self):
+    def __init__(self, on_settings_saved=None):
         self.history = deque(maxlen=HISTORY_SIZE)
         self.history_lock = threading.Lock()
         self.next_entry_id = 100
@@ -811,6 +866,9 @@ class TrayIcon:
         self.loop = None
         self.quit_event = None
         self.restore_icon_handle = None
+        self.on_settings_saved = on_settings_saved
+        self.settings_task = None
+        self.settings_process = None
 
     def add_transcript(self, text):
         # Called from the transcription worker thread; D-Bus objects live on the asyncio loop.
@@ -845,12 +903,16 @@ class TrayIcon:
                 })
             )
         items.append((self.SEPARATOR_ID, {"type": Variant("s", "separator")}))
+        items.append((self.SETTINGS_ID, {"label": Variant("s", "Настройки…")}))
         items.append((self.QUIT_ID, {"label": Variant("s", "Выйти")}))
         return items
 
     def on_click(self, item_id):
         if item_id == self.QUIT_ID:
             self.quit_event.set()
+            return
+        if item_id == self.SETTINGS_ID:
+            self.open_settings()
             return
         with self.history_lock:
             text = next((t for entry_id, _, t in self.history if entry_id == item_id), None)
@@ -869,7 +931,20 @@ class TrayIcon:
         self.item.icon_name = name
         self.item.NewIcon()
 
-    async def run(self):
+    def open_settings(self):
+        if self.settings_task and not self.settings_task.done():
+            return
+        self.settings_task = self.loop.create_task(self._run_settings())
+
+    async def _run_settings(self):
+        # A separate process keeps Tk out of the tray app; exit code 0 means "saved".
+        self.settings_process = await asyncio.create_subprocess_exec(*app_command(), "--settings")
+        code = await self.settings_process.wait()
+        self.settings_process = None
+        if code == 0 and self.on_settings_saved:
+            self.on_settings_saved()
+
+    async def run(self, open_settings=False):
         self.loop = asyncio.get_running_loop()
         self.quit_event = asyncio.Event()
         try:
@@ -898,7 +973,11 @@ class TrayIcon:
             await self._register(bus, name)
         except Exception as e:
             log(f"Tray icon unavailable: {e}")
+        if open_settings:
+            self.open_settings()
         await self.quit_event.wait()
+        if self.settings_process and self.settings_process.returncode is None:
+            self.settings_process.terminate()
 
     async def _register(self, bus, name):
         reply = await bus.call(
@@ -917,6 +996,12 @@ class TrayIcon:
             log("Tray icon registered")
 
 
+def app_command():
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, os.path.abspath(__file__)]
+
+
 def install_desktop_entry():
     data_home = os.getenv("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
     icon_dir = os.path.join(data_home, "icons", "hicolor", "256x256", "apps")
@@ -924,14 +1009,91 @@ def install_desktop_entry():
     os.makedirs(icon_dir, exist_ok=True)
     os.makedirs(apps_dir, exist_ok=True)
     shutil.copyfile(ICON_PATH, os.path.join(icon_dir, "altalk.png"))
-    if getattr(sys, "frozen", False):
-        command = sys.executable
-    else:
-        command = f"{sys.executable} {os.path.abspath(__file__)}"
     entry_path = os.path.join(apps_dir, "altalk.desktop")
     with open(entry_path, "w") as f:
-        f.write(DESKTOP_ENTRY.format(exec=command))
+        f.write(DESKTOP_ENTRY.format(exec=" ".join(app_command())))
     print(f"Installed {entry_path}")
+
+
+def check_api_key(api_key, model):
+    if not api_key:
+        return "Впиши ключ OpenAI"
+    client = OpenAI(api_key=api_key, timeout=15, max_retries=0)
+    try:
+        client.models.retrieve(model)
+    except AuthenticationError:
+        return "OpenAI не принял ключ — проверь, что он скопирован целиком"
+    except (NotFoundError, PermissionDeniedError):
+        return f"Модель {model} недоступна для этого ключа"
+    except APIConnectionError:
+        return None  # offline: save without the check rather than block the user
+    return None
+
+
+def run_settings_window():
+    # Imported here: only the settings process needs Tk, not the tray app or /refinement.
+    import tkinter as tk
+    from tkinter import font as tkfont
+    from tkinter import ttk
+
+    settings = read_settings()
+    root = tk.Tk(className="altalk")
+    root.title("Altalk — настройки")
+    root.resizable(False, False)
+    root.iconphoto(True, tk.PhotoImage(file=ICON_PATH))
+    ttk.Style(root).theme_use("clam")
+    for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont"):
+        tkfont.nametofont(name).configure(size=11)
+
+    form = ttk.Frame(root, padding=20)
+    form.grid(sticky="nsew")
+
+    ttk.Label(form, text="Ключ OpenAI").grid(row=0, column=0, columnspan=2, sticky="w")
+    key = tk.StringVar(value=settings.get("OPENAI_API_KEY", ""))
+    key_entry = ttk.Entry(form, textvariable=key, show="•", width=44)
+    key_entry.grid(row=1, column=0, sticky="we", pady=(4, 14))
+    shown = tk.BooleanVar(value=False)
+    ttk.Checkbutton(
+        form,
+        text="Показать",
+        variable=shown,
+        command=lambda: key_entry.configure(show="" if shown.get() else "•"),
+    ).grid(row=1, column=1, padx=(10, 0), pady=(4, 14))
+
+    ttk.Label(form, text="Модель распознавания").grid(row=2, column=0, columnspan=2, sticky="w")
+    current_model = settings.get(MODEL_SETTING) or MODEL
+    models = TRANSCRIBE_MODELS if current_model in TRANSCRIBE_MODELS else [current_model, *TRANSCRIBE_MODELS]
+    model = tk.StringVar(value=current_model)
+    ttk.Combobox(form, textvariable=model, values=models, state="readonly").grid(
+        row=3, column=0, columnspan=2, sticky="we", pady=(4, 6)
+    )
+
+    status = ttk.Label(form, text="", wraplength=430)
+    status.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+    buttons = ttk.Frame(form)
+    buttons.grid(row=5, column=0, columnspan=2, sticky="e", pady=(14, 0))
+    result = {"code": 1}
+
+    def save(_event=None):
+        status.configure(text="Проверяю ключ…", foreground="#555555")
+        root.update_idletasks()
+        error = check_api_key(key.get().strip(), model.get())
+        if error:
+            status.configure(text=error, foreground="#c0392b")
+            return
+        save_settings({"OPENAI_API_KEY": key.get().strip(), MODEL_SETTING: model.get()})
+        result["code"] = 0
+        root.destroy()
+
+    ttk.Button(buttons, text="Отмена", command=root.destroy).grid(row=0, column=0, padx=(0, 8))
+    ttk.Button(buttons, text="Сохранить", command=save).grid(row=0, column=1)
+    root.bind("<Return>", save)
+    root.bind("<Escape>", lambda _event: root.destroy())
+    key_entry.focus_set()
+    root.eval("tk::PlaceWindow . center")
+    root.mainloop()
+    return result["code"]
 
 
 def redirect_output_to_log():
@@ -957,19 +1119,28 @@ def main():
     if sys.argv[1:] == ["--install"]:
         install_desktop_entry()
         return
+    if sys.argv[1:] == ["--settings"]:
+        raise SystemExit(run_settings_window())
     if getattr(sys, "frozen", False) and not sys.stdout.isatty():
         redirect_output_to_log()
 
     instance_lock = acquire_instance_lock()  # held until the process exits
     try:
         api_key = load_api_key()
-    except RuntimeError as e:
-        send_notification("Altalk", f"Нет ключа OpenAI: впиши OPENAI_API_KEY в {ENV_PATHS[-1]}")
-        raise SystemExit(str(e))
+    except RuntimeError:
+        api_key = None
+        log("OPENAI_API_KEY not set: opening settings")
     transcriber = OpenAITranscriber(api_key)
     transcribe_queue = queue.Queue(maxsize=TRANSCRIBE_QUEUE_SIZE)
     recorder = PushToTalkRecorder(transcribe_queue)
-    tray = TrayIcon()
+
+    def reload_settings():
+        try:
+            transcriber.configure(load_api_key())
+        except RuntimeError:
+            transcriber.configure(None)
+
+    tray = TrayIcon(on_settings_saved=reload_settings)
 
     threading.Thread(
         target=transcription_worker,
@@ -1002,7 +1173,7 @@ def main():
 
     threading.Thread(target=keyboard_supervisor, args=(recorder,), daemon=True).start()
     log("Ready. Hold Left Alt to record.")
-    asyncio.run(tray.run())
+    asyncio.run(tray.run(open_settings=api_key is None))
     log("Quit from tray")
     instance_lock.close()
 
