@@ -33,6 +33,7 @@ ALTALK_PORTAUDIO=$(ldconfig -p | awk '/libportaudio\.so\.2 /{print $NF; exit}') 
 stage="$build/root"
 install -Dm755 "$dist/altalk" "$stage/usr/bin/altalk"
 install -Dm644 "$src/assets/altalk-256.png" "$stage/usr/share/icons/hicolor/256x256/apps/altalk.png"
+install -Dm644 "$src/LICENSE" "$stage/usr/share/licenses/altalk/LICENSE"
 mkdir -p "$stage/usr/share/applications"
 /tmp/venv/bin/python -c "import sys; sys.path.insert(0, sys.argv[1]); import icon2; print(icon2.DESKTOP_ENTRY.format(exec='altalk'), end='')" \
     "$src" > "$stage/usr/share/applications/altalk.desktop"
@@ -40,6 +41,9 @@ mkdir -p "$stage/usr/share/applications"
 # .deb
 deb="$build/deb"
 cp -a "$stage" "$deb"
+# Debian keeps the license as /usr/share/doc/<package>/copyright instead.
+rm -r "$deb/usr/share/licenses"
+install -Dm644 "$src/LICENSE" "$deb/usr/share/doc/altalk/copyright"
 mkdir -p "$deb/DEBIAN"
 cat > "$deb/DEBIAN/control" <<EOF
 Package: altalk
@@ -69,7 +73,7 @@ Name:        altalk
 Version:     $VERSION
 Release:     1
 Summary:     $DESCRIPTION
-License:     Proprietary
+License:     MIT
 URL:         https://github.com/Santttal/altalk
 Packager:    $MAINTAINER
 BuildArch:   x86_64
@@ -93,6 +97,7 @@ cp -a $stage/. %{buildroot}/
 /usr/bin/altalk
 /usr/share/applications/altalk.desktop
 /usr/share/icons/hicolor/256x256/apps/altalk.png
+%license /usr/share/licenses/altalk/LICENSE
 EOF
 rpmbuild -bb --quiet --define "_topdir $build/rpm" "$build/altalk.rpmspec"
 cp "$build/rpm/RPMS/x86_64/altalk-$VERSION-1.x86_64.rpm" "$dist/"
@@ -110,7 +115,7 @@ builddate = $(date +%s)
 packager = $MAINTAINER
 size = $(du -sb "$pkg/usr" | cut -f1)
 arch = x86_64
-license = custom
+license = MIT
 depend = glibc
 depend = alsa-lib
 depend = python-gobject

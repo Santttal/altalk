@@ -59,3 +59,7 @@ sudo usermod -aG input $USER   # Alt читается из /dev/input; посл�
 
 Из исходников без сборки: `python3 -m pip install -r requirements.txt`, ключ в `.env` рядом
 со скриптом (`cp .env.example .env`), затем `python3 icon2.py`.
+
+## Лицензия
+
+MIT — см. [LICENSE](LICENSE).
