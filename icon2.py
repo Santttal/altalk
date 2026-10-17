@@ -32,6 +32,7 @@ TRANSCRIBE_QUEUE_SIZE = 8
 MODEL = "gpt-4o-mini-transcribe"
 PROMPT = "Задача в Jira. Деплой через docker compose. CI/CD pipeline, phpstan, cs-fixer, дейлик, services.yaml, deprecated."
 VOCABULARY_PATH = os.path.join(os.path.dirname(__file__), "vocabulary.json")
+ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.png")
 DEFAULT_WATCH_DIRECTORY = "~/Downloads/icon_audio_inbox"
 WATCH_DIRECTORIES = [os.getenv("ICON_WATCH_DIR", DEFAULT_WATCH_DIRECTORY)]
 FILE_POLL_INTERVAL_SECONDS = 1.0
@@ -101,7 +102,7 @@ def load_api_key():
 def send_notification(title, message):
     try:
         subprocess.run(
-            ["notify-send", title, message],
+            ["notify-send", "-i", ICON_PATH, title, message],
             check=False,
             timeout=5,
             stdout=subprocess.DEVNULL,

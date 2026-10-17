@@ -1,6 +1,8 @@
-# voice-transcriber
+# Altalk
 
-Голос → текст через OpenAI API (`gpt-4o-mini-transcribe`, ~$0.003/мин).
+<img src="assets/icon.png" alt="Altalk" width="128">
+
+**Alt + talk**: голос → текст через OpenAI API (`gpt-4o-mini-transcribe`, ~$0.003/мин).
 Скрипт `icon2.py`, Linux.
 
 - **Push-to-talk**: держишь Left Alt — пишет микрофон, отпустил — текст в буфер обмена
