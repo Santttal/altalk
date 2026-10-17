@@ -23,10 +23,12 @@
 libadwaita из системы — они уже есть в Ubuntu с GNOME (на них работает сам GNOME Shell),
 а где их нет, `.deb` поставит их как зависимости.
 
+Готовые файлы — на странице [Releases](https://github.com/Santttal/altalk/releases/latest).
+
 ```bash
 sudo apt install ./altalk_0.1.0_amd64.deb      # как пакет: меню приложений, /usr/bin/altalk
 # или без установки — скопировать файл и запустить:
-cp altalk ~/.local/bin/ && altalk --install    # --install добавляет Altalk в меню приложений
+install -m755 altalk-linux-x86_64 ~/.local/bin/altalk && altalk --install   # пункт в меню приложений
 ```
 
 При первом запуске откроются настройки — вставь ключ OpenAI (хранится в

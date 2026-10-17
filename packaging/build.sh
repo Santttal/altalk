@@ -38,7 +38,7 @@ cat > "$pkg/DEBIAN/control" <<EOF
 Package: altalk
 Version: $VERSION
 Architecture: amd64
-Maintainer: Andrei Bogdanov <bogdanov6391@gmail.com>
+Maintainer: Andrei Bogdanov <Santttal@users.noreply.github.com>
 Depends: libc6 (>= 2.39), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1
 Recommends: ffmpeg
 Section: utils
@@ -49,3 +49,7 @@ Description: Push-to-talk voice-to-text via OpenAI API
  The tray menu keeps the last five transcripts one click away.
 EOF
 dpkg-deb --build --root-owner-group "$pkg" "$dist/altalk_${VERSION}_amd64.deb"
+
+# Release assets: the .deb, the portable executable and their checksums.
+cp "$dist/altalk" "$dist/altalk-linux-x86_64"
+(cd "$dist" && sha256sum "altalk_${VERSION}_amd64.deb" altalk-linux-x86_64 > SHA256SUMS)
