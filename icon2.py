@@ -27,7 +27,7 @@ from collections import deque
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
-from openai import APIConnectionError, AuthenticationError, NotFoundError, OpenAI, PermissionDeniedError
+from openai import OpenAI
 from evdev import InputDevice, ecodes, list_devices
 from dbus_fast import BusType, Message, MessageType, Variant
 from dbus_fast.aio import MessageBus
@@ -54,6 +54,9 @@ LOG_PATH = os.path.join(
     os.getenv("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "altalk", "altalk.log"
 )
 ICON_PATH = os.path.join(ASSETS_DIR, "altalk-256.png")
+# GTK 4 + libadwaita come with Ubuntu's GNOME, but only for the system Python.
+SETTINGS_DIALOG = ["/usr/bin/python3", os.path.join(APP_DIR, "settings_dialog.py")]
+SETTINGS_DIALOG_UNAVAILABLE = 3
 TRAY_ICON_NAME = "altalk-tray"
 COPIED_ICON_NAME = "altalk-copied"
 COPIED_FLASH_SECONDS = 1.2
@@ -143,9 +146,23 @@ def read_settings():
     return settings
 
 
+def settings_path():
+    return next((p for p in ENV_PATHS if os.path.isfile(p)), ENV_PATHS[-1])
+
+
+def settings_dialog_input():
+    settings = read_settings()
+    return json.dumps({
+        "key": settings.get("OPENAI_API_KEY", ""),
+        "model": settings.get(MODEL_SETTING) or MODEL,
+        "models": TRANSCRIBE_MODELS,
+        "path": settings_path().replace(os.path.expanduser("~"), "~", 1),
+    }).encode()
+
+
 def save_settings(values):
     # Update the .env the app actually reads; realpath keeps a symlinked .env a symlink.
-    path = os.path.realpath(next((p for p in ENV_PATHS if os.path.isfile(p)), ENV_PATHS[-1]))
+    path = os.path.realpath(settings_path())
     lines = []
     if os.path.isfile(path):
         with open(path) as f:
@@ -199,6 +216,17 @@ def send_notification(title, message):
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+
+def system_env():
+    # A PyInstaller build puts its bundled libraries first in LD_LIBRARY_PATH;
+    # system programs (ffmpeg, the GTK settings dialog) must get the original value.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("_PYI_")}
+    if "LD_LIBRARY_PATH_ORIG" in env:
+        env["LD_LIBRARY_PATH"] = env.pop("LD_LIBRARY_PATH_ORIG")
+    elif getattr(sys, "frozen", False):
+        env.pop("LD_LIBRARY_PATH", None)
+    return env
 
 
 class X11Clipboard:
@@ -285,7 +313,7 @@ def get_audio_duration(path):
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", path,
         ],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, env=system_env(),
     )
     return float(result.stdout.strip())
 
@@ -299,6 +327,7 @@ def transcode_for_upload(src, dst):
         ],
         check=True,
         stdin=subprocess.DEVNULL,
+        env=system_env(),
     )
 
 
@@ -324,6 +353,7 @@ def split_audio(src_mp3, duration, max_bytes, max_chunk_seconds, overlap, out_di
             ],
             check=True,
             stdin=subprocess.DEVNULL,
+            env=system_env(),
         )
         chunks.append(chunk_path)
     return chunks
@@ -937,12 +967,32 @@ class TrayIcon:
         self.settings_task = self.loop.create_task(self._run_settings())
 
     async def _run_settings(self):
-        # A separate process keeps Tk out of the tray app; exit code 0 means "saved".
-        self.settings_process = await asyncio.create_subprocess_exec(*app_command(), "--settings")
-        code = await self.settings_process.wait()
-        self.settings_process = None
-        if code == 0 and self.on_settings_saved:
-            self.on_settings_saved()
+        # settings_dialog.py gets the current values on stdin and prints the saved ones.
+        try:
+            self.settings_process = await asyncio.create_subprocess_exec(
+                *SETTINGS_DIALOG,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                env=system_env(),
+            )
+        except OSError:
+            code, output = SETTINGS_DIALOG_UNAVAILABLE, b""
+        else:
+            output, _ = await self.settings_process.communicate(settings_dialog_input())
+            code = self.settings_process.returncode
+            self.settings_process = None
+        if code == 0:
+            values = json.loads(output)
+            save_settings({"OPENAI_API_KEY": values["key"], MODEL_SETTING: values["model"]})
+            log(f"Settings saved to {settings_path()}")
+            if self.on_settings_saved:
+                self.on_settings_saved()
+        elif code == SETTINGS_DIALOG_UNAVAILABLE:
+            log("Settings dialog needs /usr/bin/python3 with python3-gi and gir1.2-adw-1")
+            try:
+                await _notify("Altalk", f"Для окна настроек нужен GTK 4 (gir1.2-adw-1). Ключ можно вписать в {settings_path()}")
+            except Exception:
+                pass
 
     async def run(self, open_settings=False):
         self.loop = asyncio.get_running_loop()
@@ -1015,87 +1065,6 @@ def install_desktop_entry():
     print(f"Installed {entry_path}")
 
 
-def check_api_key(api_key, model):
-    if not api_key:
-        return "Впиши ключ OpenAI"
-    client = OpenAI(api_key=api_key, timeout=15, max_retries=0)
-    try:
-        client.models.retrieve(model)
-    except AuthenticationError:
-        return "OpenAI не принял ключ — проверь, что он скопирован целиком"
-    except (NotFoundError, PermissionDeniedError):
-        return f"Модель {model} недоступна для этого ключа"
-    except APIConnectionError:
-        return None  # offline: save without the check rather than block the user
-    return None
-
-
-def run_settings_window():
-    # Imported here: only the settings process needs Tk, not the tray app or /refinement.
-    import tkinter as tk
-    from tkinter import font as tkfont
-    from tkinter import ttk
-
-    settings = read_settings()
-    root = tk.Tk(className="altalk")
-    root.title("Altalk — настройки")
-    root.resizable(False, False)
-    root.iconphoto(True, tk.PhotoImage(file=ICON_PATH))
-    ttk.Style(root).theme_use("clam")
-    for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont"):
-        tkfont.nametofont(name).configure(size=11)
-
-    form = ttk.Frame(root, padding=20)
-    form.grid(sticky="nsew")
-
-    ttk.Label(form, text="Ключ OpenAI").grid(row=0, column=0, columnspan=2, sticky="w")
-    key = tk.StringVar(value=settings.get("OPENAI_API_KEY", ""))
-    key_entry = ttk.Entry(form, textvariable=key, show="•", width=44)
-    key_entry.grid(row=1, column=0, sticky="we", pady=(4, 14))
-    shown = tk.BooleanVar(value=False)
-    ttk.Checkbutton(
-        form,
-        text="Показать",
-        variable=shown,
-        command=lambda: key_entry.configure(show="" if shown.get() else "•"),
-    ).grid(row=1, column=1, padx=(10, 0), pady=(4, 14))
-
-    ttk.Label(form, text="Модель распознавания").grid(row=2, column=0, columnspan=2, sticky="w")
-    current_model = settings.get(MODEL_SETTING) or MODEL
-    models = TRANSCRIBE_MODELS if current_model in TRANSCRIBE_MODELS else [current_model, *TRANSCRIBE_MODELS]
-    model = tk.StringVar(value=current_model)
-    ttk.Combobox(form, textvariable=model, values=models, state="readonly").grid(
-        row=3, column=0, columnspan=2, sticky="we", pady=(4, 6)
-    )
-
-    status = ttk.Label(form, text="", wraplength=430)
-    status.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
-
-    buttons = ttk.Frame(form)
-    buttons.grid(row=5, column=0, columnspan=2, sticky="e", pady=(14, 0))
-    result = {"code": 1}
-
-    def save(_event=None):
-        status.configure(text="Проверяю ключ…", foreground="#555555")
-        root.update_idletasks()
-        error = check_api_key(key.get().strip(), model.get())
-        if error:
-            status.configure(text=error, foreground="#c0392b")
-            return
-        save_settings({"OPENAI_API_KEY": key.get().strip(), MODEL_SETTING: model.get()})
-        result["code"] = 0
-        root.destroy()
-
-    ttk.Button(buttons, text="Отмена", command=root.destroy).grid(row=0, column=0, padx=(0, 8))
-    ttk.Button(buttons, text="Сохранить", command=save).grid(row=0, column=1)
-    root.bind("<Return>", save)
-    root.bind("<Escape>", lambda _event: root.destroy())
-    key_entry.focus_set()
-    root.eval("tk::PlaceWindow . center")
-    root.mainloop()
-    return result["code"]
-
-
 def redirect_output_to_log():
     # Started from the app menu there is no terminal, so keep the log in the XDG state dir.
     os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
@@ -1119,8 +1088,6 @@ def main():
     if sys.argv[1:] == ["--install"]:
         install_desktop_entry()
         return
-    if sys.argv[1:] == ["--settings"]:
-        raise SystemExit(run_settings_window())
     if getattr(sys, "frozen", False) and not sys.stdout.isatty():
         redirect_output_to_log()
 

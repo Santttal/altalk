@@ -14,14 +14,14 @@ venv="$build/venv"
 
 portaudio=$(ldconfig -p | awk '/libportaudio\.so\.2 /{print $NF; exit}')
 [ -n "$portaudio" ] || { echo "libportaudio2 is needed on the build machine" >&2; exit 1; }
-"$venv/bin/python" -c "import tkinter" 2>/dev/null \
-    || { echo "tkinter is needed on the build machine: sudo apt install python3-tk" >&2; exit 1; }
 
 "$venv/bin/pyinstaller" --noconfirm --clean --onefile --name altalk \
     --distpath "$dist" --workpath "$build/pyinstaller" --specpath "$build" \
     --add-data "$root/assets/altalk-tray.png:assets" \
     --add-data "$root/assets/altalk-copied.png:assets" \
     --add-data "$root/assets/altalk-256.png:assets" \
+    --add-data "$root/settings_dialog.py:." \
+    --exclude-module tkinter \
     --add-binary "$portaudio:." \
     --runtime-hook "$root/packaging/pyi_rth_portaudio.py" \
     --collect-submodules Xlib \
@@ -39,7 +39,7 @@ Package: altalk
 Version: $VERSION
 Architecture: amd64
 Maintainer: Andrei Bogdanov <bogdanov6391@gmail.com>
-Depends: libc6 (>= 2.39)
+Depends: libc6 (>= 2.39), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1
 Recommends: ffmpeg
 Section: utils
 Priority: optional

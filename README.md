@@ -13,13 +13,15 @@
   «Выйти» закрывает приложение.
 - **Настройки…** в меню трея: ключ OpenAI и модель распознавания (`gpt-4o-mini-transcribe` —
   по умолчанию, `gpt-4o-transcribe`, `gpt-transcribe`, `whisper-1`). Ключ проверяется при
-  сохранении, применяется сразу, без перезапуска.
+  сохранении, применяется сразу, без перезапуска. Окно — стандартное GNOME (GTK 4 + libadwaita).
 - **Свои термины**: `~/.config/altalk/vocabulary.json` (образец — `vocabulary.example.json`):
   `prompt` — подсказка для распознавания, `corrections` — regex-правки после него.
 
 ## Установка
 
-`altalk` — один исполняемый файл: Python и все библиотеки внутри, системные пакеты не нужны.
+`altalk` — один исполняемый файл: Python и все библиотеки внутри. Окно настроек берёт GTK 4 и
+libadwaita из системы — они уже есть в Ubuntu с GNOME (на них работает сам GNOME Shell),
+а где их нет, `.deb` поставит их как зависимости.
 
 ```bash
 sudo apt install ./altalk_0.1.0_amd64.deb      # как пакет: меню приложений, /usr/bin/altalk
@@ -50,8 +52,7 @@ sudo usermod -aG input $USER   # Alt читается из /dev/input; посл�
 ```
 
 Скрипт сам создаёт `build/venv` и ставит туда зависимости и PyInstaller. На машине сборки
-нужны `libportaudio2` и `python3-tk` — они вкладываются внутрь `altalk`, пользователям их
-ставить не надо.
+нужен `libportaudio2` — он вкладывается внутрь `altalk`, пользователям его ставить не надо.
 
 Из исходников без сборки: `python3 -m pip install -r requirements.txt`, ключ в `.env` рядом
 со скриптом (`cp .env.example .env`), затем `python3 icon2.py`.
