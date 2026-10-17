@@ -19,17 +19,17 @@
 
 ## Установка
 
-`altalk` — один исполняемый файл: Python и все библиотеки внутри. Окно настроек берёт GTK 4 и
-libadwaita из системы — они уже есть в Ubuntu с GNOME (на них работает сам GNOME Shell),
-а где их нет, `.deb` поставит их как зависимости.
-
 Готовые файлы — на странице [Releases](https://github.com/Santttal/altalk/releases/latest).
+Внутри каждого пакета один исполняемый файл `altalk` с Python и всеми библиотеками; из системы
+берутся только звук (ALSA) и, для окна настроек, GTK 4 + libadwaita — менеджер пакетов
+поставит их сам.
 
-```bash
-sudo apt install ./altalk_0.1.0_amd64.deb      # как пакет: меню приложений, /usr/bin/altalk
-# или без установки — скопировать файл и запустить:
-install -m755 altalk-linux-x86_64 ~/.local/bin/altalk && altalk --install   # пункт в меню приложений
-```
+| Система | Установка |
+|---|---|
+| Ubuntu 22.04+, Debian 12+, Linux Mint 21+ | `sudo apt install ./altalk_0.1.0_amd64.deb` |
+| Fedora, RHEL / AlmaLinux / Rocky 9 | `sudo dnf install ./altalk-0.1.0-1.x86_64.rpm` |
+| Arch, Manjaro | `sudo pacman -U altalk-0.1.0-1-x86_64.pkg.tar.zst` |
+| Любой Linux x86-64 с glibc 2.30+ | `install -m755 altalk-linux-x86_64 ~/.local/bin/altalk && altalk --install` |
 
 При первом запуске откроются настройки — вставь ключ OpenAI (хранится в
 `~/.config/altalk/.env`). И один раз дай доступ к клавиатуре:
@@ -38,8 +38,9 @@ install -m755 altalk-linux-x86_64 ~/.local/bin/altalk && altalk --install   # п
 sudo usermod -aG input $USER   # Alt читается из /dev/input; после этого перелогиниться
 ```
 
-Иконку в трее на GNOME показывает расширение AppIndicator (в Ubuntu включено по умолчанию),
-в KDE — штатно. Нужна glibc 2.39+ (Ubuntu 24.04 и новее); проверено на Ubuntu 24.04, GNOME, Wayland.
+Значок в трее: в Ubuntu и KDE работает сразу. В GNOME на Fedora, Debian и Arch нужно
+расширение AppIndicator (`gnome-shell-extension-appindicator`) — поставить и включить
+в приложении «Расширения».
 
 ## Запуск
 
@@ -50,11 +51,11 @@ sudo usermod -aG input $USER   # Alt читается из /dev/input; посл�
 ## Сборка
 
 ```bash
-./packaging/build.sh   # → dist/altalk и dist/altalk_0.1.0_amd64.deb
+./packaging/build.sh   # → dist/: .deb, .rpm, .pkg.tar.zst, altalk-linux-x86_64, SHA256SUMS
 ```
 
-Скрипт сам создаёт `build/venv` и ставит туда зависимости и PyInstaller. На машине сборки
-нужен `libportaudio2` — он вкладывается внутрь `altalk`, пользователям его ставить не надо.
+Нужен только Docker: сборка идёт в контейнере Debian 11 (`packaging/Dockerfile`), поэтому
+бинарник требует лишь glibc 2.30+ и работает на всех системах из таблицы выше.
 
 Из исходников без сборки: `python3 -m pip install -r requirements.txt`, ключ в `.env` рядом
 со скриптом (`cp .env.example .env`), затем `python3 icon2.py`.

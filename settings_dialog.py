@@ -47,6 +47,7 @@ def check_api_key(api_key, model):
 
 
 class SettingsWindow(Adw.ApplicationWindow):
+    # Only widgets from libadwaita 1.1 / GTK 4.6, so it also runs on Ubuntu 22.04 and Debian 12.
     def __init__(self, app, current):
         super().__init__(application=app, title="Настройки Altalk", default_width=480, resizable=False)
         self.result = None
@@ -56,16 +57,18 @@ class SettingsWindow(Adw.ApplicationWindow):
         if model not in self.models:
             self.models.insert(0, model)
 
-        self.key_row = Adw.PasswordEntryRow(title="Ключ API")
-        self.key_row.set_text(current.get("key", ""))
-        self.key_row.connect("entry-activated", self.on_save)
+        self.key_entry = Gtk.PasswordEntry(show_peek_icon=True, hexpand=True, valign=Gtk.Align.CENTER)
+        self.key_entry.set_text(current.get("key", ""))
+        self.key_entry.connect("activate", self.on_save)
+        key_row = Adw.ActionRow(title="Ключ API")
+        key_row.add_suffix(self.key_entry)
         self.model_row = Adw.ComboRow(title="Модель распознавания", model=Gtk.StringList.new(self.models))
         self.model_row.set_selected(self.models.index(model))
 
         group = Adw.PreferencesGroup(title="OpenAI", description=f"Хранится в {current.get('path', '')}")
-        group.add(self.key_row)
+        group.add(key_row)
         group.add(self.model_row)
-        page = Adw.PreferencesPage()
+        page = Adw.PreferencesPage(vexpand=True)
         page.add(group)
 
         cancel_button = Gtk.Button(label="Отмена")
@@ -77,12 +80,16 @@ class SettingsWindow(Adw.ApplicationWindow):
         header.pack_start(cancel_button)
         header.pack_end(self.save_button)
 
-        self.banner = Adw.Banner()
-        view = Adw.ToolbarView()
-        view.add_top_bar(header)
-        view.add_top_bar(self.banner)
-        view.set_content(page)
-        self.set_content(view)
+        self.error_label = Gtk.Label(wrap=True, xalign=0, visible=False, margin_start=24, margin_end=24, margin_top=18)
+        self.error_label.add_css_class("error")
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        content.append(header)
+        content.append(self.error_label)
+        content.append(page)
+        self.set_content(content)
+        # Otherwise focus starts on «Отмена» (first in the header) and Enter would cancel.
+        self.set_default_widget(self.save_button)
+        self.set_focus(self.key_entry)
 
         shortcuts = Gtk.ShortcutController()
         shortcuts.add_shortcut(
@@ -91,7 +98,7 @@ class SettingsWindow(Adw.ApplicationWindow):
         self.add_controller(shortcuts)
 
     def on_save(self, *_args):
-        key = self.key_row.get_text().strip()
+        key = self.key_entry.get_text().strip()
         model = self.models[self.model_row.get_selected()]
         self.save_button.set_sensitive(False)
         self.save_button.set_label("Проверяю…")
@@ -105,8 +112,9 @@ class SettingsWindow(Adw.ApplicationWindow):
         self.save_button.set_sensitive(True)
         self.save_button.set_label("Сохранить")
         if error:
-            self.banner.set_title(error)
-            self.banner.set_revealed(True)
+            self.error_label.set_text(error)
+            self.error_label.set_visible(True)
+            self.key_entry.grab_focus()
             return False
         self.result = {"key": key, "model": model}
         self.close()
