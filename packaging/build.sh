@@ -38,7 +38,7 @@ cat > "$pkg/DEBIAN/control" <<EOF
 Package: altalk
 Version: $VERSION
 Architecture: amd64
-Maintainer: Andrei Bogdanov <Santttal@users.noreply.github.com>
+Maintainer: Andrei Bogdanov <hello@abogdanov.dev>
 Depends: libc6 (>= 2.39), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1
 Recommends: ffmpeg
 Section: utils
