@@ -973,7 +973,9 @@ class TrayIcon:
                 *SETTINGS_DIALOG,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                env=system_env(),
+                # Local-only GIO: GTK otherwise calls gvfsd on startup and waits out
+                # its 25 s D-Bus timeout whenever gvfsd hangs (e.g. on a flaky USB disk).
+                env={**system_env(), "GIO_USE_VFS": "local"},
             )
         except OSError:
             code, output = SETTINGS_DIALOG_UNAVAILABLE, b""
