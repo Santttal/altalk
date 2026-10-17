@@ -11,6 +11,10 @@ a = Analysis(
     datas=[
         (os.path.join(root, "assets", "altalk-tray.png"), "assets"),
         (os.path.join(root, "assets", "altalk-copied.png"), "assets"),
+        (os.path.join(root, "assets", "altalk-failed.png"), "assets"),
+        (os.path.join(root, "assets", "altalk-busy-1.png"), "assets"),
+        (os.path.join(root, "assets", "altalk-busy-2.png"), "assets"),
+        (os.path.join(root, "assets", "altalk-busy-3.png"), "assets"),
         (os.path.join(root, "assets", "altalk-256.png"), "assets"),
         (os.path.join(root, "settings_dialog.py"), "."),
     ],

@@ -10,6 +10,7 @@ Push-to-talk по Left Alt + мониторинг папки для аудиоф
 import asyncio
 import fcntl
 import io
+import itertools
 import json
 import math
 import queue
@@ -62,7 +63,11 @@ SETTINGS_DIALOG = ["/usr/bin/python3", os.path.join(APP_DIR, "settings_dialog.py
 SETTINGS_DIALOG_UNAVAILABLE = 3
 TRAY_ICON_NAME = "altalk-tray"
 COPIED_ICON_NAME = "altalk-copied"
+FAILED_ICON_NAME = "altalk-failed"
+BUSY_ICON_NAMES = ["altalk-busy-1", "altalk-busy-2", "altalk-busy-3"]  # typing dots, cycled
+BUSY_FRAME_SECONDS = 0.4
 COPIED_FLASH_SECONDS = 1.2
+FAILED_FLASH_SECONDS = 3.0
 HISTORY_SIZE = 5
 HISTORY_PREVIEW_CHARS = 45
 HISTORY_ICONS = {
@@ -993,6 +998,7 @@ class TrayIcon:
         self.loop = None
         self.quit_event = None
         self.restore_icon_handle = None
+        self.busy_task = None
         self.on_settings_saved = on_settings_saved
         self.settings_task = None
         self.settings_process = None
@@ -1008,7 +1014,16 @@ class TrayIcon:
     def update(self, job):
         # Called from worker threads; D-Bus objects live on the asyncio loop.
         if self.loop:
-            self.loop.call_soon_threadsafe(self._layout_changed)
+            self.loop.call_soon_threadsafe(self._job_changed, job.state)
+
+    def _job_changed(self, state):
+        self._layout_changed()
+        if state == "done":
+            self._flash(COPIED_ICON_NAME, COPIED_FLASH_SECONDS)
+        elif state == "failed":
+            self._flash(FAILED_ICON_NAME, FAILED_FLASH_SECONDS)
+        else:
+            self._refresh_icon()
 
     def _retry(self, job):
         job.state = "queued"
@@ -1019,7 +1034,7 @@ class TrayIcon:
             log("Transcription queue is full. Not retrying.")
             return
         log(f"Retrying transcription from {job.stamp}")
-        self._layout_changed()
+        self._job_changed(job.state)
 
     def _layout_changed(self):
         self.menu.revision += 1
@@ -1069,16 +1084,46 @@ class TrayIcon:
         text = job.text
         copy_to_clipboard(text)
         log(f"Copied from history: {preview_text(text)}")
-        self._set_icon(COPIED_ICON_NAME)
+        self._flash(COPIED_ICON_NAME, COPIED_FLASH_SECONDS)
+
+    def _flash(self, name, seconds):
+        # Shown for a moment instead of the busy or idle icon.
+        self._stop_busy_animation()
         if self.restore_icon_handle:
             self.restore_icon_handle.cancel()
-        self.restore_icon_handle = self.loop.call_later(
-            COPIED_FLASH_SECONDS, self._set_icon, TRAY_ICON_NAME
-        )
+        self._set_icon(name)
+        self.restore_icon_handle = self.loop.call_later(seconds, self._end_flash)
+
+    def _end_flash(self):
+        self.restore_icon_handle = None
+        self._refresh_icon()
+
+    def _refresh_icon(self):
+        # Busy while anything is queued or being transcribed, idle (ready) otherwise.
+        if self.restore_icon_handle:
+            return  # _end_flash comes back here
+        with self.history_lock:
+            busy = any(job.state in ("queued", "running") for _, job in self.history)
+        if busy and not self.busy_task:
+            self.busy_task = self.loop.create_task(self._animate_busy())
+        elif not busy:
+            self._stop_busy_animation()
+            self._set_icon(TRAY_ICON_NAME)
+
+    def _stop_busy_animation(self):
+        if self.busy_task:
+            self.busy_task.cancel()
+            self.busy_task = None
+
+    async def _animate_busy(self):
+        for name in itertools.cycle(BUSY_ICON_NAMES):
+            self._set_icon(name)
+            await asyncio.sleep(BUSY_FRAME_SECONDS)
 
     def _set_icon(self, name):
-        self.item.icon_name = name
-        self.item.NewIcon()
+        if self.item.icon_name != name:
+            self.item.icon_name = name
+            self.item.NewIcon()
 
     def open_settings(self):
         if self.settings_task and not self.settings_task.done():
