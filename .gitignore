@@ -1,0 +1,6 @@
+.env
+*.log
+__pycache__/
+.venv/
+.idea/workspace.xml
+vocabulary.json

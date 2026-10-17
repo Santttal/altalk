@@ -1,0 +1,6 @@
+{
+  "prompt": "Задача PROJ-123 в Jira. Деплой на staging через docker compose.",
+  "corrections": {
+    "\\bпродж\\b": "PROJ"
+  }
+}

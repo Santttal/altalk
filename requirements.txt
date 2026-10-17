@@ -1,0 +1,6 @@
+openai>=2.36
+sounddevice>=0.5
+soundfile>=0.13
+numpy>=2.4
+pyperclip>=1.11
+evdev>=1.9
