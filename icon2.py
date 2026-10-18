@@ -1,6 +1,6 @@
 """
 Распознавание речи через OpenAI API (gpt-4o-mini-transcribe).
-Push-to-talk по Left Alt + мониторинг папки для аудиофайлов.
+Push-to-talk по Left Alt или Left Ctrl + мониторинг папки для аудиофайлов.
 
 Запуск:
     python3 -m pip install -r requirements.txt
@@ -48,12 +48,17 @@ TRANSCRIBE_QUEUE_SIZE = 8
 MODEL = "gpt-4o-mini-transcribe"
 MODEL_SETTING = "ALTALK_MODEL"
 TRANSCRIBE_MODELS = ["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe", "whisper-1"]
+HOTKEY_SETTING = "ALTALK_HOTKEY"
+HOTKEYS = {"alt": ("Left Alt", ecodes.KEY_LEFTALT), "ctrl": ("Left Ctrl", ecodes.KEY_LEFTCTRL)}
+DEFAULT_HOTKEY = "alt"
 PROMPT = "Задача в Jira. Деплой через docker compose. CI/CD pipeline, phpstan, cs-fixer, дейлик, services.yaml, deprecated."
 APP_DIR = os.path.dirname(os.path.abspath(__file__))  # source checkout or the PyInstaller bundle
 ASSETS_DIR = os.path.join(APP_DIR, "assets")
-CONFIG_DIR = os.path.join(os.getenv("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "altalk")
+CONFIG_HOME = os.getenv("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+CONFIG_DIR = os.path.join(CONFIG_HOME, "altalk")
 ENV_PATHS = [os.path.join(APP_DIR, ".env"), os.path.join(CONFIG_DIR, ".env")]
 VOCABULARY_PATHS = [os.path.join(APP_DIR, "vocabulary.json"), os.path.join(CONFIG_DIR, "vocabulary.json")]
+AUTOSTART_PATH = os.path.join(CONFIG_HOME, "autostart", "altalk.desktop")
 LOG_PATH = os.path.join(
     os.getenv("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "altalk", "altalk.log"
 )
@@ -153,11 +158,16 @@ def read_env_file(path):
 def read_settings():
     # The process environment is only a fallback; the first .env in ENV_PATHS wins over the rest.
     settings = {
-        key: os.environ[key] for key in ("OPENAI_API_KEY", MODEL_SETTING) if os.environ.get(key)
+        key: os.environ[key] for key in ("OPENAI_API_KEY", MODEL_SETTING, HOTKEY_SETTING) if os.environ.get(key)
     }
     for path in reversed(ENV_PATHS):
         settings.update(read_env_file(path))
     return settings
+
+
+def read_hotkey():
+    hotkey = read_settings().get(HOTKEY_SETTING, "").lower()
+    return hotkey if hotkey in HOTKEYS else DEFAULT_HOTKEY
 
 
 def settings_path():
@@ -170,6 +180,9 @@ def settings_dialog_input():
         "key": settings.get("OPENAI_API_KEY", ""),
         "model": settings.get(MODEL_SETTING) or MODEL,
         "models": TRANSCRIBE_MODELS,
+        "hotkey": read_hotkey(),
+        "hotkeys": [[hotkey, name] for hotkey, (name, _keycode) in HOTKEYS.items()],
+        "autostart": autostart_enabled(),
         "path": settings_path().replace(os.path.expanduser("~"), "~", 1),
     }).encode()
 
@@ -556,12 +569,18 @@ class OpenAITranscriber:
 
 
 class PushToTalkRecorder:
-    def __init__(self, submit):
+    def __init__(self, submit, hotkey):
         self.submit = submit
         self.recording = False
         self.aborted = False
         self.audio_buffer = []
         self.buffer_lock = threading.Lock()
+        self.set_hotkey(hotkey)
+
+    def set_hotkey(self, hotkey):
+        # Also called by the tray after the settings window saved another key.
+        self.key_name, self.keycode = HOTKEYS[hotkey]
+        self.recording = False
 
     def callback(self, indata, frames, time_info, status):
         if status:
@@ -610,24 +629,29 @@ class PushToTalkRecorder:
             log("Transcription queue is full. Dropping recording.")
 
     def on_press(self, keycode):
-        if keycode == ecodes.KEY_LEFTALT:
+        if keycode == self.keycode:
             if not self.recording:
                 self.recording = True
                 self.aborted = False
                 with self.buffer_lock:
                     self.audio_buffer = []
                 log("Recording started")
-        elif self.recording and not self.aborted:
+        else:
+            self.cancel(f"Other key pressed (code {keycode})")
+
+    def cancel(self, reason):
+        # The hotkey was used as a modifier (Ctrl+C, Alt+Tab, Ctrl+click), not to talk.
+        if self.recording and not self.aborted:
             self.aborted = True
             with self.buffer_lock:
                 self.audio_buffer = []
-            log(f"Other key pressed (code {keycode}) — recording aborted")
+            log(f"{reason} — recording aborted")
 
     def on_release(self, keycode):
-        if keycode == ecodes.KEY_LEFTALT and self.recording:
+        if keycode == self.keycode and self.recording:
             self.recording = False
             if self.aborted:
-                log("Recording discarded (other keys were pressed while holding Alt)")
+                log(f"Recording discarded (other keys were pressed while holding {self.key_name})")
                 with self.buffer_lock:
                     self.audio_buffer = []
             else:
@@ -635,30 +659,35 @@ class PushToTalkRecorder:
                 threading.Thread(target=self.flush_recording, daemon=True).start()
 
 
-def find_keyboard_devices():
+def find_input_devices():
+    # Keyboards for the hotkey; mice and touchpads so that a click or a scroll cancels the recording.
     devices = []
     for path in list_devices():
         try:
             d = InputDevice(path)
         except (OSError, PermissionError):
             continue
-        caps = d.capabilities()
-        if ecodes.EV_KEY in caps and ecodes.KEY_LEFTALT in caps[ecodes.EV_KEY]:
+        keys = d.capabilities().get(ecodes.EV_KEY, [])
+        if any(code in keys for code in (ecodes.KEY_LEFTALT, ecodes.KEY_LEFTCTRL, ecodes.BTN_LEFT)):
             devices.append(d)
     return devices
 
 
-def listen_keyboard(device, recorder):
+def listen_device(device, recorder):
     try:
         for event in device.read_loop():
+            if event.type == ecodes.EV_REL and event.code in (ecodes.REL_WHEEL, ecodes.REL_HWHEEL):
+                recorder.cancel("Mouse wheel scrolled")
             if event.type != ecodes.EV_KEY:
                 continue
+            if ecodes.BTN_DIGI <= event.code <= ecodes.BTN_TOOL_QUADTAP:
+                continue  # a finger touching the touchpad, not a click
             if event.value == 1:
                 recorder.on_press(event.code)
             elif event.value == 0:
                 recorder.on_release(event.code)
     except OSError as e:
-        log(f"Keyboard listener for {device.path} stopped: {e}")
+        log(f"Input listener for {device.path} stopped: {e}")
     finally:
         try:
             device.close()
@@ -666,22 +695,22 @@ def listen_keyboard(device, recorder):
             pass
 
 
-KEYBOARD_RESCAN_INTERVAL_SECONDS = 2.0
+INPUT_RESCAN_INTERVAL_SECONDS = 2.0
 
 
-def keyboard_supervisor(recorder):
+def input_supervisor(recorder):
     active = {}
     while True:
         for path in list(active):
             thread, _ = active[path]
             if not thread.is_alive():
                 del active[path]
-                log(f"Keyboard listener for {path} gone, will rescan")
+                log(f"Input listener for {path} gone, will rescan")
 
         try:
-            current = find_keyboard_devices()
+            current = find_input_devices()
         except Exception as e:
-            log(f"Keyboard rescan error: {e}")
+            log(f"Input rescan error: {e}")
             current = []
 
         for device in current:
@@ -692,13 +721,13 @@ def keyboard_supervisor(recorder):
                     pass
                 continue
             t = threading.Thread(
-                target=listen_keyboard, args=(device, recorder), daemon=True
+                target=listen_device, args=(device, recorder), daemon=True
             )
             t.start()
             active[device.path] = (t, device)
             log(f"Listening on {device.path} ({device.name})")
 
-        time.sleep(KEYBOARD_RESCAN_INTERVAL_SECONDS)
+        time.sleep(INPUT_RESCAN_INTERVAL_SECONDS)
 
 
 class DirectoryAudioEnqueuer:
@@ -859,6 +888,7 @@ class StatusNotifierItem(ServiceInterface):
     def __init__(self):
         super().__init__("org.kde.StatusNotifierItem")
         self.icon_name = TRAY_ICON_NAME
+        self.hotkey_name = HOTKEYS[read_hotkey()][0]
 
     @dbus_property(access=PropertyAccess.READ)
     def Category(self) -> "s":
@@ -886,7 +916,7 @@ class StatusNotifierItem(ServiceInterface):
 
     @dbus_property(access=PropertyAccess.READ)
     def ToolTip(self) -> "(sa(iiay)ss)":
-        return ["", [], "Altalk", "Зажми Left Alt и говори"]
+        return ["", [], "Altalk", f"Зажми {self.hotkey_name} и говори"]
 
     @dbus_property(access=PropertyAccess.READ)
     def ItemIsMenu(self) -> "b":
@@ -914,6 +944,10 @@ class StatusNotifierItem(ServiceInterface):
 
     @dbus_signal()
     def NewIcon(self):
+        pass
+
+    @dbus_signal()
+    def NewToolTip(self):
         pass
 
 
@@ -1151,10 +1185,17 @@ class TrayIcon:
             self.settings_process = None
         if code == 0:
             values = json.loads(output)
-            save_settings({"OPENAI_API_KEY": values["key"], MODEL_SETTING: values["model"]})
+            save_settings({
+                "OPENAI_API_KEY": values["key"],
+                MODEL_SETTING: values["model"],
+                HOTKEY_SETTING: values["hotkey"],
+            })
             log(f"Settings saved to {settings_path()}")
+            set_autostart(values["autostart"])
             if self.on_settings_saved:
                 self.on_settings_saved()
+            self.item.hotkey_name = HOTKEYS[values["hotkey"]][0]
+            self.item.NewToolTip()
         elif code == SETTINGS_DIALOG_UNAVAILABLE:
             log("Settings dialog needs /usr/bin/python3 with python3-gi and gir1.2-adw-1")
             try:
@@ -1220,6 +1261,32 @@ def app_command():
     return [sys.executable, os.path.abspath(__file__)]
 
 
+def desktop_entry():
+    return DESKTOP_ENTRY.format(exec=" ".join(app_command()))
+
+
+def autostart_enabled():
+    # Session managers skip an entry that is hidden or switched off (e.g. by GNOME Tweaks).
+    if not os.path.isfile(AUTOSTART_PATH):
+        return False
+    entry = read_env_file(AUTOSTART_PATH)
+    return entry.get("Hidden") != "true" and entry.get("X-GNOME-Autostart-enabled") != "false"
+
+
+def set_autostart(enabled):
+    # XDG autostart: GNOME, KDE and the rest start ~/.config/autostart/*.desktop at login.
+    if enabled == autostart_enabled():
+        return
+    if enabled:
+        os.makedirs(os.path.dirname(AUTOSTART_PATH), exist_ok=True)
+        with open(AUTOSTART_PATH, "w") as f:
+            f.write(desktop_entry())
+        log(f"Autostart enabled: {AUTOSTART_PATH}")
+    else:
+        os.remove(AUTOSTART_PATH)
+        log("Autostart disabled")
+
+
 def install_desktop_entry():
     data_home = os.getenv("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
     icon_dir = os.path.join(data_home, "icons", "hicolor", "256x256", "apps")
@@ -1229,7 +1296,7 @@ def install_desktop_entry():
     shutil.copyfile(ICON_PATH, os.path.join(icon_dir, "altalk.png"))
     entry_path = os.path.join(apps_dir, "altalk.desktop")
     with open(entry_path, "w") as f:
-        f.write(DESKTOP_ENTRY.format(exec=" ".join(app_command())))
+        f.write(desktop_entry())
     print(f"Installed {entry_path}")
 
 
@@ -1273,9 +1340,10 @@ def main():
             transcriber.configure(load_api_key())
         except RuntimeError:
             transcriber.configure(None)
+        recorder.set_hotkey(read_hotkey())
 
     tray = TrayIcon(transcribe_queue, on_settings_saved=reload_settings)
-    recorder = PushToTalkRecorder(tray.submit)
+    recorder = PushToTalkRecorder(tray.submit, read_hotkey())
 
     threading.Thread(
         target=transcription_worker,
@@ -1291,7 +1359,7 @@ def main():
     else:
         log("ffmpeg/ffprobe not found: audio-file inbox disabled")
 
-    initial = find_keyboard_devices()
+    initial = find_input_devices()
     if not initial:
         send_notification(
             "Altalk", "Нет доступа к клавиатуре: sudo usermod -aG input $USER и перелогиниться"
@@ -1306,8 +1374,8 @@ def main():
         except Exception:
             pass
 
-    threading.Thread(target=keyboard_supervisor, args=(recorder,), daemon=True).start()
-    log("Ready. Hold Left Alt to record.")
+    threading.Thread(target=input_supervisor, args=(recorder,), daemon=True).start()
+    log(f"Ready. Hold {recorder.key_name} to record.")
     asyncio.run(tray.run(open_settings=api_key is None))
     log("Quit from tray")
     instance_lock.close()

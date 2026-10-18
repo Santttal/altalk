@@ -68,8 +68,30 @@ class SettingsWindow(Adw.ApplicationWindow):
         group = Adw.PreferencesGroup(title="OpenAI", description=f"Хранится в {current.get('path', '')}")
         group.add(key_row)
         group.add(self.model_row)
+
+        self.hotkeys = current.get("hotkeys") or []
+        hotkey_ids = [hotkey for hotkey, _name in self.hotkeys]
+        self.hotkey_row = Adw.ComboRow(
+            title="Клавиша записи",
+            subtitle="Зажми её и говори",
+            model=Gtk.StringList.new([name for _hotkey, name in self.hotkeys]),
+        )
+        if current.get("hotkey") in hotkey_ids:
+            self.hotkey_row.set_selected(hotkey_ids.index(current["hotkey"]))
+        self.autostart_check = Gtk.CheckButton(active=current.get("autostart", False), valign=Gtk.Align.CENTER)
+        autostart_row = Adw.ActionRow(
+            title="Добавить в автозапуск",
+            subtitle="Altalk будет запускаться при входе в систему",
+            activatable_widget=self.autostart_check,
+        )
+        autostart_row.add_prefix(self.autostart_check)
+        general_group = Adw.PreferencesGroup(title="Общие")
+        general_group.add(self.hotkey_row)
+        general_group.add(autostart_row)
+
         page = Adw.PreferencesPage(vexpand=True)
         page.add(group)
+        page.add(general_group)
 
         cancel_button = Gtk.Button(label="Отмена")
         cancel_button.connect("clicked", lambda _button: self.close())
@@ -116,7 +138,12 @@ class SettingsWindow(Adw.ApplicationWindow):
             self.error_label.set_visible(True)
             self.key_entry.grab_focus()
             return False
-        self.result = {"key": key, "model": model}
+        self.result = {
+            "key": key,
+            "model": model,
+            "hotkey": self.hotkeys[self.hotkey_row.get_selected()][0],
+            "autostart": self.autostart_check.get_active(),
+        }
         self.close()
         return False
 
