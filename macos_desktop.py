@@ -61,6 +61,7 @@ _recorder = None
 _tray = None  # icon2.TrayIcon once its status item exists
 _settings = None  # the open settings window, kept referenced until it closes
 _notification_center = None
+_notifications_allowed = None  # until macOS answers; refused → osascript
 
 
 def run(main):
@@ -151,6 +152,7 @@ def watch_input(recorder):
     global _recorder
     _recorder = recorder
     threading.Thread(target=_listen_keyboard, daemon=True).start()
+    _notifications()  # ask now, so the answer is known before the first notification
     # Ask for the microphone now rather than on the first recording, which the prompt would cut short.
     audio = AVFoundation.AVMediaTypeAudio
     if AVFoundation.AVCaptureDevice.authorizationStatusForMediaType_(audio) == AVFoundation.AVAuthorizationStatusNotDetermined:
@@ -177,23 +179,28 @@ class NotificationDelegate(Foundation.NSObject):
 _notification_delegate = NotificationDelegate.alloc().init()
 
 
+def _on_authorization(granted, error):
+    global _notifications_allowed
+    _notifications_allowed = bool(granted)
+    app.log("Notifications allowed" if granted else f"Notifications not allowed, falling back to osascript: {error}")
+
+
 def _notifications():
     # UserNotifications works only inside an .app bundle; from source there is osascript.
     global _notification_center
     if _notification_center is None and Foundation.NSBundle.mainBundle().bundleIdentifier():
         center = UserNotifications.UNUserNotificationCenter.currentNotificationCenter()
         center.setDelegate_(_notification_delegate)
-        center.requestAuthorizationWithOptions_completionHandler_(
-            UserNotifications.UNAuthorizationOptionAlert,
-            lambda granted, error: app.log(f"Notifications {'allowed' if granted else f'not allowed: {error}'}"),
-        )
+        center.requestAuthorizationWithOptions_completionHandler_(UserNotifications.UNAuthorizationOptionAlert, _on_authorization)
         _notification_center = center
     return _notification_center
 
 
 def notify(title, message):
     center = _notifications()
-    if center is None:
+    # macOS may refuse notifications to an app without a Developer ID; osascript still gets through
+    # (shown as from Script Editor).
+    if center is None or _notifications_allowed is False:
         script = f"display notification {json.dumps(message, ensure_ascii=False)} with title {json.dumps(title, ensure_ascii=False)}"
         subprocess.run(["osascript", "-e", script], check=False)
         return
