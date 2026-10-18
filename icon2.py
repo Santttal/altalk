@@ -1,7 +1,8 @@
 """
 Распознавание речи через OpenAI API (gpt-4o-mini-transcribe).
 Push-to-talk по Left Alt или Left Ctrl + мониторинг папки для аудиофайлов.
-Всё системное (клавиатура, трей, буфер обмена, автозапуск) — в linux_desktop.py и windows_desktop.py.
+Всё системное (клавиатура, трей, буфер обмена, автозапуск) — в linux_desktop.py, windows_desktop.py
+и macos_desktop.py.
 
 Запуск:
     python3 -m pip install -r requirements.txt
@@ -22,6 +23,9 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import deque
 
 import numpy as np
@@ -40,7 +44,10 @@ MODEL = "gpt-4o-mini-transcribe"
 MODEL_SETTING = "ALTALK_MODEL"
 TRANSCRIBE_MODELS = ["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe", "whisper-1"]
 HOTKEY_SETTING = "ALTALK_HOTKEY"
-HOTKEYS = {"alt": "Left Alt", "ctrl": "Left Ctrl"}
+if sys.platform == "darwin":
+    HOTKEYS = {"alt": "Left Option", "ctrl": "Left Control"}
+else:
+    HOTKEYS = {"alt": "Left Alt", "ctrl": "Left Ctrl"}
 DEFAULT_HOTKEY = "alt"
 SPEECH_LANGUAGE_SETTING = "ALTALK_LANGUAGE"
 # What OpenAI transcribes (its speech-to-text docs): ISO 639-1 code → the language's name in
@@ -69,6 +76,9 @@ ASSETS_DIR = os.path.join(APP_DIR, "assets")
 if sys.platform == "win32":
     CONFIG_DIR = os.path.join(os.getenv("APPDATA") or os.path.expanduser("~"), "Altalk")
     STATE_DIR = os.path.join(os.getenv("LOCALAPPDATA") or os.path.expanduser("~"), "Altalk")
+elif sys.platform == "darwin":
+    CONFIG_DIR = os.path.expanduser("~/Library/Application Support/Altalk")
+    STATE_DIR = os.path.expanduser("~/Library/Logs/Altalk")
 else:
     CONFIG_DIR = os.path.join(os.getenv("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "altalk")
     STATE_DIR = os.path.join(os.getenv("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "altalk")
@@ -138,6 +148,7 @@ UI_TEXTS = {
         "notify_no_key": "Нет ключа OpenAI — открой «Настройки…» в меню трея",
         "notify_too_quiet": "Слишком тихо — проверьте микрофон/громкость",
         "notify_no_keyboard": "Нет доступа к клавиатуре: sudo usermod -aG input $USER и перелогиниться",
+        "notify_no_input_monitoring": "Разреши Altalk «Мониторинг ввода»: Системные настройки → Конфиденциальность и безопасность",
         "notify_running": "Уже запущен — иконка в трее",
         "notify_no_gtk": "Для окна настроек нужен GTK 4 (gir1.2-adw-1). Ключ можно вписать в {path}",
         "dialog_title": "Настройки Altalk",
@@ -179,6 +190,7 @@ UI_TEXTS = {
         "notify_no_key": "No OpenAI key — open Settings… in the tray menu",
         "notify_too_quiet": "Too quiet — check the microphone and its volume",
         "notify_no_keyboard": "No access to the keyboard: run sudo usermod -aG input $USER and log in again",
+        "notify_no_input_monitoring": "Allow Altalk in System Settings → Privacy & Security → Input Monitoring",
         "notify_running": "Already running — see the tray icon",
         "notify_no_gtk": "The settings window needs GTK 4 (gir1.2-adw-1). The key can also go into {path}",
         "dialog_title": "Altalk Settings",
@@ -218,6 +230,10 @@ def system_language():
         import ctypes
         import locale
         name = locale.windows_locale.get(ctypes.windll.kernel32.GetUserDefaultUILanguage(), "")
+    elif sys.platform == "darwin":
+        # An app started from Finder gets no LANG; macOS keeps the languages in its own settings.
+        from Foundation import NSLocale
+        name = str((NSLocale.preferredLanguages() or [""])[0])
     else:
         name = next((os.environ[n] for n in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG") if os.environ.get(n)), "")
     code = re.split(r"[_.@:-]", name)[0].lower()
@@ -283,6 +299,26 @@ def read_speech_language():
     return SYSTEM_LANGUAGE if SYSTEM_LANGUAGE in SPEECH_LANGUAGES else UI_LANGUAGE
 
 
+def check_api_key(api_key, model):
+    # What the settings windows run on «Save»; settings_dialog.py (a separate process) has a copy.
+    if not api_key:
+        return tr("enter_key")
+    request = urllib.request.Request(
+        f"https://api.openai.com/v1/models/{urllib.parse.quote(model)}",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        urllib.request.urlopen(request, timeout=15).close()
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return tr("key_rejected")
+        if e.code in (403, 404):
+            return tr("model_unavailable", model=model)
+    except OSError:
+        pass  # offline: save without the check rather than block the user
+    return None
+
+
 def settings_path():
     return next((p for p in ENV_PATHS if os.path.isfile(p)), ENV_PATHS[-1])
 
@@ -340,6 +376,8 @@ def load_desktop():
     # Imported here, not at the top: other scripts import this file just for OpenAITranscriber.
     if sys.platform == "win32":
         import windows_desktop as module
+    elif sys.platform == "darwin":
+        import macos_desktop as module
     else:
         import linux_desktop as module
     module.app = sys.modules[__name__]
@@ -1061,8 +1099,8 @@ def redirect_output_to_log():
     # Started from the app menu there is no terminal, so keep the log in the state dir.
     os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
     log_file = open(LOG_PATH, "a", encoding="utf-8", buffering=1)
-    if sys.platform == "win32":
-        sys.stdout = sys.stderr = log_file  # a windowed .exe has no console streams at all
+    if sys.stdout is None:
+        sys.stdout = sys.stderr = log_file  # a windowed .exe or .app has no console streams at all
         return
     os.dup2(log_file.fileno(), sys.stdout.fileno())
     os.dup2(log_file.fileno(), sys.stderr.fileno())
@@ -1113,7 +1151,7 @@ def main():
 
     desktop.watch_input(recorder)
     log(f"Ready. Hold {recorder.key_name} to record.")
-    asyncio.run(tray.run(open_settings=api_key is None))
+    desktop.run(tray.run(open_settings=api_key is None))
     log("Quit from tray")
     instance_lock.close()
 

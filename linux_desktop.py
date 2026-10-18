@@ -214,6 +214,10 @@ def input_supervisor(recorder):
         time.sleep(INPUT_RESCAN_INTERVAL_SECONDS)
 
 
+def run(main):
+    asyncio.run(main)
+
+
 def watch_input(recorder):
     initial = find_input_devices()
     if not initial:

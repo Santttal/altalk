@@ -10,10 +10,8 @@ import os
 import subprocess
 import threading
 import time
+import asyncio
 import tkinter as tk
-import urllib.error
-import urllib.parse
-import urllib.request
 import winreg
 from ctypes import wintypes
 from tkinter import ttk
@@ -416,6 +414,10 @@ def window():
     return _window
 
 
+def run(main):
+    asyncio.run(main)
+
+
 def watch_input(recorder):
     window().recorder = recorder
 
@@ -478,26 +480,6 @@ class Tray:
 
     def stop(self):
         window().hide_icon()
-
-
-def check_api_key(api_key, model, texts):
-    # The same check as in settings_dialog.py, which Windows does not have.
-    if not api_key:
-        return texts["enter_key"]
-    request = urllib.request.Request(
-        f"https://api.openai.com/v1/models/{urllib.parse.quote(model)}",
-        headers={"Authorization": f"Bearer {api_key}"},
-    )
-    try:
-        urllib.request.urlopen(request, timeout=15).close()
-    except urllib.error.HTTPError as e:
-        if e.code == 401:
-            return texts["key_rejected"]
-        if e.code in (403, 404):
-            return texts["model_unavailable"].format(model=model)
-    except OSError:
-        pass  # offline: save without the check rather than block the user
-    return None
 
 
 class SettingsDialog:
@@ -591,7 +573,7 @@ class SettingsDialog:
         self.root.after(100, self.on_checked, key, model)
 
     def check(self, key, model):
-        self.check_result = [check_api_key(key, model, self.texts)]
+        self.check_result = [app.check_api_key(key, model)]
 
     def on_checked(self, key, model):
         if self.check_result is None:

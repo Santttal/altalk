@@ -5,3 +5,7 @@ numpy>=2.4
 evdev>=1.9; sys_platform == "linux"
 dbus-fast>=5.2; sys_platform == "linux"
 python-xlib>=0.33; sys_platform == "linux"
+pyobjc-framework-Cocoa>=11; sys_platform == "darwin"
+pyobjc-framework-Quartz>=11; sys_platform == "darwin"
+pyobjc-framework-AVFoundation>=11; sys_platform == "darwin"
+pyobjc-framework-UserNotifications>=11; sys_platform == "darwin"

@@ -1,0 +1,1 @@
+"NSMicrophoneUsageDescription" = "Altalk записывает голос, пока зажата клавиша, и отправляет его в OpenAI для распознавания.";
