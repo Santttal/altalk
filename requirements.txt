@@ -2,6 +2,6 @@ openai>=2.36
 sounddevice>=0.5
 soundfile>=0.13
 numpy>=2.4
-evdev>=1.9
-dbus-fast>=5.2
-python-xlib>=0.33
+evdev>=1.9; sys_platform == "linux"
+dbus-fast>=5.2; sys_platform == "linux"
+python-xlib>=0.33; sys_platform == "linux"

@@ -20,7 +20,7 @@ a = Analysis(
     ],
     hiddenimports=collect_submodules("Xlib"),
     runtime_hooks=[os.path.join(SPECPATH, "pyi_rth_portaudio.py")],
-    excludes=["tkinter"],
+    excludes=["tkinter", "windows_desktop"],
 )
 # ALSA has to come from the target system: its PipeWire/PulseAudio plugins live in
 # distro-specific directories that a bundled libasound would not look in.
