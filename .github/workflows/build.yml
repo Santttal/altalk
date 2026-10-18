@@ -52,6 +52,14 @@ jobs:
           done
           cat "$log"
           grep -q "Tray icon registered" "$log"
+      - name: Hold Left Option, then press a key while holding it
+        run: |
+          build/macos/dist/Altalk.app/Contents/MacOS/altalk &
+          sleep 15
+          build/macos/venv/bin/python packaging/macos/press-keys.py
+          sleep 5
+          kill $! && wait $! || true
+          tail -n 12 ~/Library/Logs/Altalk/altalk.log
       - uses: actions/upload-artifact@v7
         with:
           name: macos-${{ matrix.runner }}
