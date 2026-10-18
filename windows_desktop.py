@@ -480,10 +480,10 @@ class Tray:
         window().hide_icon()
 
 
-def check_api_key(api_key, model):
+def check_api_key(api_key, model, texts):
     # The same check as in settings_dialog.py, which Windows does not have.
     if not api_key:
-        return "Впиши ключ OpenAI"
+        return texts["enter_key"]
     request = urllib.request.Request(
         f"https://api.openai.com/v1/models/{urllib.parse.quote(model)}",
         headers={"Authorization": f"Bearer {api_key}"},
@@ -492,9 +492,9 @@ def check_api_key(api_key, model):
         urllib.request.urlopen(request, timeout=15).close()
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            return "OpenAI не принял ключ — проверь, что он скопирован целиком"
+            return texts["key_rejected"]
         if e.code in (403, 404):
-            return f"Модель {model} недоступна для этого ключа"
+            return texts["model_unavailable"].format(model=model)
     except OSError:
         pass  # offline: save without the check rather than block the user
     return None
@@ -503,6 +503,7 @@ def check_api_key(api_key, model):
 class SettingsDialog:
     # The same fields as the GTK window on Linux, in the native Windows look (ttk's default theme).
     def __init__(self, current):
+        self.texts = texts = current["texts"]
         self.result = None
         self.check_result = None
         self.models = list(current.get("models") or [])
@@ -512,9 +513,11 @@ class SettingsDialog:
         self.hotkeys = current.get("hotkeys") or []
         hotkey_ids = [hotkey for hotkey, _name in self.hotkeys]
         hotkey = current.get("hotkey")
+        self.languages = current["languages"]
+        language_ids = [language for language, _name in self.languages]
 
         self.root = root = tk.Tk()
-        root.title("Настройки Altalk")
+        root.title(texts["dialog_title"])
         root.resizable(False, False)
         if os.path.isfile(_icon_path("altalk")):
             root.iconbitmap(default=_icon_path("altalk"))
@@ -524,40 +527,45 @@ class SettingsDialog:
         openai = ttk.Labelframe(frame, text="OpenAI", padding=(12, 6, 12, 10))
         openai.grid(row=0, column=0, sticky="ew")
         openai.columnconfigure(1, weight=1)
-        ttk.Label(openai, text="Ключ API").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Label(openai, text=texts["api_key"]).grid(row=0, column=0, sticky="w", pady=4)
         self.key = tk.StringVar(root, current.get("key", ""))
         self.key_entry = ttk.Entry(openai, textvariable=self.key, show="•", width=44)
         self.key_entry.grid(row=0, column=1, sticky="ew", padx=(12, 0), pady=4)
         self.show_key = tk.BooleanVar(root, False)
-        ttk.Checkbutton(openai, text="Показать ключ", variable=self.show_key, command=self.toggle_key).grid(
+        ttk.Checkbutton(openai, text=texts["show_key"], variable=self.show_key, command=self.toggle_key).grid(
             row=1, column=1, sticky="w", padx=(12, 0))
-        ttk.Label(openai, text="Модель распознавания").grid(row=2, column=0, sticky="w", pady=(8, 4))
+        ttk.Label(openai, text=texts["model"]).grid(row=2, column=0, sticky="w", pady=(8, 4))
         self.model = ttk.Combobox(openai, values=self.models, state="readonly")
         self.model.set(model)
         self.model.grid(row=2, column=1, sticky="ew", padx=(12, 0), pady=(8, 4))
-        ttk.Label(openai, text=f"Хранится в {current.get('path', '')}", foreground="gray").grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(openai, text=texts["speech_language"]).grid(row=3, column=0, sticky="w", pady=4)
+        self.language = ttk.Combobox(openai, values=[name for _language, name in self.languages], state="readonly")
+        language = current.get("language")
+        self.language.current(language_ids.index(language) if language in language_ids else 0)
+        self.language.grid(row=3, column=1, sticky="ew", padx=(12, 0), pady=4)
+        ttk.Label(openai, text=texts["stored_in"].format(path=current.get("path", "")), foreground="gray").grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        general = ttk.Labelframe(frame, text="Общие", padding=(12, 6, 12, 10))
+        general = ttk.Labelframe(frame, text=texts["general"], padding=(12, 6, 12, 10))
         general.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         general.columnconfigure(1, weight=1)
-        ttk.Label(general, text="Клавиша записи").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Label(general, text=texts["hotkey"]).grid(row=0, column=0, sticky="w", pady=4)
         self.hotkey = ttk.Combobox(general, values=[name for _hotkey, name in self.hotkeys], state="readonly")
         if self.hotkeys:
             self.hotkey.current(hotkey_ids.index(hotkey) if hotkey in hotkey_ids else 0)
         self.hotkey.grid(row=0, column=1, sticky="ew", padx=(12, 0), pady=4)
-        ttk.Label(general, text="Зажми её и говори", foreground="gray").grid(
+        ttk.Label(general, text=texts["hotkey_hint"], foreground="gray").grid(
             row=1, column=1, sticky="w", padx=(12, 0))
         self.autostart = tk.BooleanVar(root, current.get("autostart", False))
-        ttk.Checkbutton(general, text="Добавить в автозапуск", variable=self.autostart).grid(
+        ttk.Checkbutton(general, text=texts["autostart"], variable=self.autostart).grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         self.error = ttk.Label(frame, foreground=ERROR_COLOR, wraplength=420)
         buttons = ttk.Frame(frame)
         buttons.grid(row=3, column=0, sticky="e", pady=(12, 0))
-        self.save_button = ttk.Button(buttons, text="Сохранить", default="active", command=self.on_save)
+        self.save_button = ttk.Button(buttons, text=texts["save"], default="active", command=self.on_save)
         self.save_button.grid(row=0, column=0)
-        ttk.Button(buttons, text="Отмена", command=root.destroy).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(buttons, text=texts["cancel"], command=root.destroy).grid(row=0, column=1, padx=(8, 0))
         root.bind("<Return>", self.on_save)
         root.bind("<Escape>", lambda _event: root.destroy())
 
@@ -576,14 +584,14 @@ class SettingsDialog:
             return
         key, model = self.key.get().strip(), self.model.get()
         self.save_button.state(["disabled"])
-        self.save_button.configure(text="Проверяю…")
+        self.save_button.configure(text=self.texts["checking"])
         self.check_result = None
         # The HTTP check runs off the Tk thread so the window keeps redrawing.
         threading.Thread(target=self.check, args=(key, model), daemon=True).start()
         self.root.after(100, self.on_checked, key, model)
 
     def check(self, key, model):
-        self.check_result = [check_api_key(key, model)]
+        self.check_result = [check_api_key(key, model, self.texts)]
 
     def on_checked(self, key, model):
         if self.check_result is None:
@@ -591,7 +599,7 @@ class SettingsDialog:
             return
         error = self.check_result[0]
         self.save_button.state(["!disabled"])
-        self.save_button.configure(text="Сохранить")
+        self.save_button.configure(text=self.texts["save"])
         if error:
             self.error.configure(text=error)
             self.error.grid(row=2, column=0, sticky="w", pady=(10, 0))
@@ -600,6 +608,7 @@ class SettingsDialog:
         self.result = {
             "key": key,
             "model": model,
+            "language": self.languages[self.language.current()][0],
             "hotkey": self.hotkeys[self.hotkey.current()][0],
             "autostart": self.autostart.get(),
         }

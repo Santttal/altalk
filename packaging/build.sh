@@ -6,7 +6,7 @@
 set -eu
 umask 022
 
-VERSION=0.2.0
+VERSION=0.3.0
 MAINTAINER="Andrei Bogdanov <hello@abogdanov.dev>"
 DESCRIPTION="Push-to-talk voice-to-text via OpenAI API"
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -15,10 +15,11 @@ if [ "${1:-}" != "--in-container" ]; then
     docker build -q -t altalk-build "$root/packaging" >/dev/null
     docker build -q -t altalk-build-windows -f "$root/packaging/Dockerfile.windows" "$root/packaging" >/dev/null
     mkdir -p "$root/build/pip-cache" "$root/build/pip-cache-windows"
-    docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+    # Host networking: with a VPN up, the DNS servers Docker hands to containers are unreachable.
+    docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp \
         -v "$root:/src" -v "$root/build/pip-cache:/tmp/.cache/pip" \
         altalk-build sh /src/packaging/build.sh --in-container
-    docker run --rm -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+    docker run --rm --network host -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
         -e PIP_CACHE_DIR='Z:\cache' -e PYTHONDONTWRITEBYTECODE=1 \
         -v "$root:/src" -v "$root/build/pip-cache-windows:/cache" \
         altalk-build-windows sh /src/packaging/build-windows.sh "$VERSION"

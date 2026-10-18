@@ -31,7 +31,11 @@ SolidCompression=yes
 CloseApplications=force
 RestartApplications=no
 
+; The installer speaks the language of Windows: Russian on a Russian system, English otherwise.
+ShowLanguageDialog=no
+
 [Languages]
+Name: "en"; MessagesFile: "compiler:Default.isl"
 Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Tasks]

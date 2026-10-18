@@ -39,6 +39,7 @@ DESKTOP_ENTRY = """\
 Type=Application
 Name=Altalk
 Comment=Hold Left Alt, speak, get the text in the clipboard
+Comment[ru]=Зажми Left Alt, говори — текст в буфере обмена
 Exec={exec}
 Icon=altalk
 Terminal=false
@@ -216,7 +217,7 @@ def input_supervisor(recorder):
 def watch_input(recorder):
     initial = find_input_devices()
     if not initial:
-        notify("Altalk", "Нет доступа к клавиатуре: sudo usermod -aG input $USER и перелогиниться")
+        notify("Altalk", app.tr("notify_no_keyboard"))
         raise SystemExit(
             "No accessible keyboard devices found in /dev/input/. "
             "Ensure your user is in the 'input' group: sudo usermod -aG input $USER"
@@ -454,7 +455,7 @@ class Tray:
         if code == SETTINGS_DIALOG_UNAVAILABLE:
             app.log("Settings dialog needs /usr/bin/python3 with python3-gi and gir1.2-adw-1")
             try:
-                await _notify("Altalk", f"Для окна настроек нужен GTK 4 (gir1.2-adw-1). Ключ можно вписать в {app.settings_path()}")
+                await _notify("Altalk", app.tr("notify_no_gtk", path=app.settings_path()))
             except Exception:
                 pass
         return json.loads(output) if code == 0 else None
@@ -510,6 +511,6 @@ def acquire_instance_lock():
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        notify("Altalk", "Уже запущен — иконка в трее")
+        notify("Altalk", app.tr("notify_running"))
         raise SystemExit("Altalk is already running")
     return lock_file

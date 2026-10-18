@@ -42,7 +42,28 @@ TRANSCRIBE_MODELS = ["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcr
 HOTKEY_SETTING = "ALTALK_HOTKEY"
 HOTKEYS = {"alt": "Left Alt", "ctrl": "Left Ctrl"}
 DEFAULT_HOTKEY = "alt"
-PROMPT = "Задача в Jira. Деплой через docker compose. CI/CD pipeline, phpstan, cs-fixer, дейлик, services.yaml, deprecated."
+SPEECH_LANGUAGE_SETTING = "ALTALK_LANGUAGE"
+# What OpenAI transcribes (its speech-to-text docs): ISO 639-1 code → the language's name in
+# itself, ordered by that name.
+SPEECH_LANGUAGES = {
+    "af": "Afrikaans", "az": "Azərbaycan dili", "id": "Bahasa Indonesia", "ms": "Bahasa Melayu",
+    "bs": "Bosanski", "ca": "Català", "cs": "Čeština", "cy": "Cymraeg", "da": "Dansk",
+    "de": "Deutsch", "et": "Eesti", "en": "English", "es": "Español", "fr": "Français",
+    "gl": "Galego", "hr": "Hrvatski", "is": "Íslenska", "it": "Italiano", "sw": "Kiswahili",
+    "lv": "Latviešu", "lt": "Lietuvių", "hu": "Magyar", "mi": "Māori", "nl": "Nederlands",
+    "no": "Norsk", "pl": "Polski", "pt": "Português", "ro": "Română", "sk": "Slovenčina",
+    "sl": "Slovenščina", "fi": "Suomi", "sv": "Svenska", "tl": "Tagalog", "vi": "Tiếng Việt",
+    "tr": "Türkçe", "el": "Ελληνικά", "be": "Беларуская", "bg": "Български", "mk": "Македонски",
+    "ru": "Русский", "sr": "Српски", "uk": "Українська", "kk": "Қазақ тілі", "hy": "Հայերեն",
+    "he": "עברית", "ur": "اردو", "ar": "العربية", "fa": "فارسی", "ne": "नेपाली", "mr": "मराठी",
+    "hi": "हिन्दी", "ta": "தமிழ்", "kn": "ಕನ್ನಡ", "th": "ไทย", "ko": "한국어", "zh": "中文",
+    "ja": "日本語",
+}
+DEFAULT_PROMPTS = {
+    "ru": "Задача в Jira. Деплой через docker compose. CI/CD pipeline, phpstan, cs-fixer, дейлик, services.yaml, deprecated.",
+    "en": "Jira task. Deploy with docker compose. CI/CD pipeline, phpstan, cs-fixer, daily standup, services.yaml, deprecated.",
+}
+PROMPT = None  # vocabulary.json's "prompt"; without one, DEFAULT_PROMPTS for the speech language
 APP_DIR = os.path.dirname(os.path.abspath(__file__))  # source checkout or the PyInstaller bundle
 ASSETS_DIR = os.path.join(APP_DIR, "assets")
 if sys.platform == "win32":
@@ -95,6 +116,91 @@ CORRECTIONS = {
     r"\bдепрекейтед\b": "deprecated",
 }
 
+UI_TEXTS = {
+    "ru": {
+        "no_history": "Пока нет транскрипций",
+        "settings": "Настройки…",
+        "quit": "Выйти",
+        "status_failed": "Ошибка: {error} — повторить",
+        "status_empty": "ничего не распознано",
+        "status_queued": "в очереди",
+        "status_retry": "попытка {attempt} из {total}: {error}",
+        "status_running": "распознаю…",
+        "error_no_key": "нет ключа OpenAI",
+        "error_timeout": "таймаут",
+        "error_connection": "нет связи",
+        "error_bad_key": "неверный ключ",
+        "error_no_credit": "нет денег на счёте",
+        "error_rate_limit": "лимит запросов",
+        "error_status": "OpenAI ответил {code}",
+        "hint": "Зажми {key} и говори",
+        "notify_done": "Распознано",
+        "notify_no_key": "Нет ключа OpenAI — открой «Настройки…» в меню трея",
+        "notify_too_quiet": "Слишком тихо — проверьте микрофон/громкость",
+        "notify_no_keyboard": "Нет доступа к клавиатуре: sudo usermod -aG input $USER и перелогиниться",
+        "notify_running": "Уже запущен — иконка в трее",
+        "notify_no_gtk": "Для окна настроек нужен GTK 4 (gir1.2-adw-1). Ключ можно вписать в {path}",
+        "dialog_title": "Настройки Altalk",
+        "cancel": "Отмена",
+        "save": "Сохранить",
+        "checking": "Проверяю…",
+        "stored_in": "Хранится в {path}",
+        "api_key": "Ключ API",
+        "show_key": "Показать ключ",
+        "model": "Модель распознавания",
+        "speech_language": "Язык речи",
+        "general": "Общие",
+        "hotkey": "Клавиша записи",
+        "hotkey_hint": "Зажми её и говори",
+        "autostart": "Добавить в автозапуск",
+        "autostart_hint": "Altalk будет запускаться при входе в систему",
+        "enter_key": "Впиши ключ OpenAI",
+        "key_rejected": "OpenAI не принял ключ — проверь, что он скопирован целиком",
+        "model_unavailable": "Модель {model} недоступна для этого ключа",
+    },
+    "en": {
+        "no_history": "No transcriptions yet",
+        "settings": "Settings…",
+        "quit": "Quit",
+        "status_failed": "Error: {error} — retry",
+        "status_empty": "nothing recognized",
+        "status_queued": "queued",
+        "status_retry": "attempt {attempt} of {total}: {error}",
+        "status_running": "transcribing…",
+        "error_no_key": "no OpenAI key",
+        "error_timeout": "timed out",
+        "error_connection": "no connection",
+        "error_bad_key": "invalid key",
+        "error_no_credit": "out of credit",
+        "error_rate_limit": "rate limited",
+        "error_status": "OpenAI returned {code}",
+        "hint": "Hold {key} and speak",
+        "notify_done": "Transcription Complete",
+        "notify_no_key": "No OpenAI key — open Settings… in the tray menu",
+        "notify_too_quiet": "Too quiet — check the microphone and its volume",
+        "notify_no_keyboard": "No access to the keyboard: run sudo usermod -aG input $USER and log in again",
+        "notify_running": "Already running — see the tray icon",
+        "notify_no_gtk": "The settings window needs GTK 4 (gir1.2-adw-1). The key can also go into {path}",
+        "dialog_title": "Altalk Settings",
+        "cancel": "Cancel",
+        "save": "Save",
+        "checking": "Checking…",
+        "stored_in": "Stored in {path}",
+        "api_key": "API key",
+        "show_key": "Show key",
+        "model": "Transcription model",
+        "speech_language": "Speech language",
+        "general": "General",
+        "hotkey": "Record key",
+        "hotkey_hint": "Hold it and speak",
+        "autostart": "Start at login",
+        "autostart_hint": "Altalk starts when you log in",
+        "enter_key": "Enter your OpenAI key",
+        "key_rejected": "OpenAI rejected the key — check that it was copied in full",
+        "model_unavailable": "Model {model} is not available for this key",
+    },
+}
+
 SUPPORTED_AUDIO_EXTENSIONS = {
     ".mp3",
     ".wav",
@@ -104,6 +210,26 @@ SUPPORTED_AUDIO_EXTENSIONS = {
     ".aac",
     ".webm",
 }
+
+
+def system_language():
+    # The system's language as a code like "ru" or "de" ("" when it is unknown, e.g. LANG=C).
+    if sys.platform == "win32":
+        import ctypes
+        import locale
+        name = locale.windows_locale.get(ctypes.windll.kernel32.GetUserDefaultUILanguage(), "")
+    else:
+        name = next((os.environ[n] for n in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG") if os.environ.get(n)), "")
+    code = re.split(r"[_.@:-]", name)[0].lower()
+    return {"nb": "no", "nn": "no"}.get(code, code)  # OpenAI knows Norwegian only as "no"
+
+
+SYSTEM_LANGUAGE = system_language()
+UI_LANGUAGE = SYSTEM_LANGUAGE if SYSTEM_LANGUAGE in UI_TEXTS else "en"  # the interface: Russian or English
+
+
+def tr(key, /, **values):
+    return UI_TEXTS[UI_LANGUAGE][key].format(**values)
 
 
 def load_vocabulary(paths=VOCABULARY_PATHS):
@@ -135,7 +261,9 @@ def read_env_file(path):
 def read_settings():
     # The process environment is only a fallback; the first .env in ENV_PATHS wins over the rest.
     settings = {
-        key: os.environ[key] for key in ("OPENAI_API_KEY", MODEL_SETTING, HOTKEY_SETTING) if os.environ.get(key)
+        key: os.environ[key]
+        for key in ("OPENAI_API_KEY", MODEL_SETTING, HOTKEY_SETTING, SPEECH_LANGUAGE_SETTING)
+        if os.environ.get(key)
     }
     for path in reversed(ENV_PATHS):
         settings.update(read_env_file(path))
@@ -145,6 +273,14 @@ def read_settings():
 def read_hotkey():
     hotkey = read_settings().get(HOTKEY_SETTING, "").lower()
     return hotkey if hotkey in HOTKEYS else DEFAULT_HOTKEY
+
+
+def read_speech_language():
+    # Unset, it follows the system language; a Russian speaker on an English system sets it.
+    language = read_settings().get(SPEECH_LANGUAGE_SETTING, "").lower()
+    if language in SPEECH_LANGUAGES:
+        return language
+    return SYSTEM_LANGUAGE if SYSTEM_LANGUAGE in SPEECH_LANGUAGES else UI_LANGUAGE
 
 
 def settings_path():
@@ -157,10 +293,13 @@ def settings_dialog_values():
         "key": settings.get("OPENAI_API_KEY", ""),
         "model": settings.get(MODEL_SETTING) or MODEL,
         "models": TRANSCRIBE_MODELS,
+        "language": read_speech_language(),
+        "languages": [[language, name] for language, name in SPEECH_LANGUAGES.items()],
         "hotkey": read_hotkey(),
         "hotkeys": [[hotkey, name] for hotkey, name in HOTKEYS.items()],
         "autostart": desktop.autostart_enabled(),
         "path": settings_path().replace(os.path.expanduser("~"), "~", 1),
+        "texts": UI_TEXTS[UI_LANGUAGE],
     }
 
 
@@ -338,17 +477,17 @@ def is_retryable(error):
 def describe_error(error):
     # A few words for the tray menu; the log keeps the full message.
     if isinstance(error, MissingApiKeyError):
-        return "нет ключа OpenAI"
+        return tr("error_no_key")
     if isinstance(error, APITimeoutError):
-        return "таймаут"
+        return tr("error_timeout")
     if isinstance(error, APIConnectionError):
-        return "нет связи"
+        return tr("error_connection")
     if isinstance(error, AuthenticationError):
-        return "неверный ключ"
+        return tr("error_bad_key")
     if isinstance(error, RateLimitError):
-        return "нет денег на счёте" if error.code == "insufficient_quota" else "лимит запросов"
+        return tr("error_no_credit") if error.code == "insufficient_quota" else tr("error_rate_limit")
     if isinstance(error, APIStatusError):
-        return f"OpenAI ответил {error.status_code}"
+        return tr("error_status", code=error.status_code)
     return preview_text(str(error) or type(error).__name__, 30)
 
 
@@ -369,11 +508,12 @@ class OpenAITranscriber:
         self.configure(api_key, model)
 
     def configure(self, api_key, model=None):
-        # Also called by the tray after the settings window saved a new key or model.
+        # Also called by the tray after the settings window saved a new key, model or language.
         self.model = model or read_settings().get(MODEL_SETTING) or MODEL
+        self.language = read_speech_language()
         if not api_key:
             self.client = None
-            log(f"OpenAI transcriber waiting for an API key (model: {self.model})")
+            log(f"OpenAI transcriber waiting for an API key (model: {self.model}, language: {self.language})")
             return
         # Retries are ours (see _request), not the SDK's, so the tray can show the attempt.
         self.client = OpenAI(
@@ -382,14 +522,14 @@ class OpenAITranscriber:
             max_retries=0,
         )
         log(
-            f"OpenAI transcriber ready (model: {self.model}, "
+            f"OpenAI transcriber ready (model: {self.model}, language: {self.language}, "
             f"timeout: {REQUEST_TIMEOUT_SECONDS:.0f}s, retries: {MAX_RETRIES})"
         )
 
     def _require_client(self):
         if self.client is None:
             log("OPENAI_API_KEY not set, skipping transcription")
-            send_notification("Altalk", "Нет ключа OpenAI — открой «Настройки…» в меню трея")
+            send_notification("Altalk", tr("notify_no_key"))
             raise MissingApiKeyError("OPENAI_API_KEY not set")
 
     def _audio_to_wav_bytes(self, audio_array):
@@ -402,6 +542,10 @@ class OpenAITranscriber:
     def _request(self, audio_file, on_attempt=None):
         # on_attempt(attempt, previous_error) runs before every request, starting from 1.
         error = None
+        options = {"language": self.language}
+        prompt = PROMPT or DEFAULT_PROMPTS.get(self.language)  # no default for most languages
+        if prompt:
+            options["prompt"] = prompt
         for attempt in range(1, MAX_RETRIES + 2):
             if on_attempt:
                 on_attempt(attempt, error)
@@ -411,8 +555,7 @@ class OpenAITranscriber:
                 response = self.client.audio.transcriptions.create(
                     model=self.model,
                     file=audio_file,
-                    language="ru",
-                    prompt=PROMPT,
+                    **options,
                 )
             except APIError as e:
                 if attempt > MAX_RETRIES or not is_retryable(e):
@@ -542,7 +685,7 @@ class PushToTalkRecorder:
         rms = np.sqrt(np.mean(audio_data ** 2))
         if rms < 0.0025:
             log(f"Recording too quiet (rms={rms:.4f}). Skipping.")
-            send_notification("Altalk", "Слишком тихо — проверьте микрофон/громкость")
+            send_notification("Altalk", tr("notify_too_quiet"))
             return
 
         try:
@@ -695,7 +838,7 @@ def transcription_worker(transcriber, in_queue, on_update=lambda job: None):
                 log("Transcribed text copied to clipboard.")
                 stripped = text.strip()
                 preview = stripped[:40] + "..." if len(stripped) > 40 else stripped
-                send_notification("Transcription Complete", preview)
+                send_notification(tr("notify_done"), preview)
             else:
                 job.state = "empty"
                 on_update(job)
@@ -714,15 +857,15 @@ def job_status(job):
     if job.state == "done":
         return preview_text(job.text)
     if job.state == "failed":
-        status = f"Ошибка: {job.error} — повторить"
+        status = tr("status_failed", error=job.error)
     elif job.state == "empty":
-        status = "ничего не распознано"
+        status = tr("status_empty")
     elif job.state == "queued":
-        status = "в очереди"
+        status = tr("status_queued")
     elif job.attempt > 1:
-        status = f"попытка {job.attempt} из {MAX_RETRIES + 1}: {job.error}"
+        status = tr("status_retry", attempt=job.attempt, total=MAX_RETRIES + 1, error=job.error)
     else:
-        status = "распознаю…"
+        status = tr("status_running")
     if job.source_type == "file":
         return f"{os.path.basename(job.source_data)} — {status}"
     return status
@@ -736,7 +879,7 @@ def preview_text(text, limit=HISTORY_PREVIEW_CHARS):
 
 
 def hotkey_hint(hotkey):
-    return f"Зажми {HOTKEYS[hotkey]} и говори"
+    return tr("hint", key=HOTKEYS[hotkey])
 
 
 class TrayIcon:
@@ -800,7 +943,7 @@ class TrayIcon:
             history = list(self.history)
         items = []
         if not history:
-            items.append((self.EMPTY_ID, {"label": "Пока нет транскрипций", "enabled": False}))
+            items.append((self.EMPTY_ID, {"label": tr("no_history"), "enabled": False}))
         for entry_id, job in history:
             items.append(
                 (entry_id, {
@@ -811,8 +954,8 @@ class TrayIcon:
                 })
             )
         items.append((self.SEPARATOR_ID, {"type": "separator"}))
-        items.append((self.SETTINGS_ID, {"label": "Настройки…"}))
-        items.append((self.QUIT_ID, {"label": "Выйти"}))
+        items.append((self.SETTINGS_ID, {"label": tr("settings")}))
+        items.append((self.QUIT_ID, {"label": tr("quit")}))
         return items
 
     def on_click(self, item_id):
@@ -885,6 +1028,7 @@ class TrayIcon:
         save_settings({
             "OPENAI_API_KEY": values["key"],
             MODEL_SETTING: values["model"],
+            SPEECH_LANGUAGE_SETTING: values["language"],
             HOTKEY_SETTING: values["hotkey"],
         })
         log(f"Settings saved to {settings_path()}")

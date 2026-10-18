@@ -14,10 +14,12 @@ Linux и Windows 10/11.
   любой копирует её текст в буфер обмена, иконка в трее на секунду становится галочкой.
   «Выйти» закрывает приложение.
 - **Настройки…** в меню трея: ключ OpenAI, модель распознавания (`gpt-4o-mini-transcribe` —
-  по умолчанию, `gpt-4o-transcribe`, `gpt-transcribe`, `whisper-1`), клавиша записи (Left Alt —
+  по умолчанию, `gpt-4o-transcribe`, `gpt-transcribe`, `whisper-1`), язык речи (57 языков,
+  которые распознаёт OpenAI; по умолчанию — язык системы), клавиша записи (Left Alt —
   по умолчанию, или Left Ctrl) и автозапуск при входе в систему. Ключ проверяется при
   сохранении, всё применяется сразу, без перезапуска. Окно — стандартное для системы:
   GTK 4 + libadwaita в Linux, обычные элементы Windows в Windows.
+- **Язык интерфейса** — русский или английский, по языку системы.
 - **Свои термины**: `vocabulary.json` рядом с настройками (образец — `vocabulary.example.json`):
   `prompt` — подсказка для распознавания, `corrections` — regex-правки после него.
 
@@ -30,11 +32,11 @@ Linux и Windows 10/11.
 
 | Система | Установка |
 |---|---|
-| Windows 10, 11 (x64) | `altalk-0.2.0-setup-x64.exe` — установщик, права администратора не нужны |
+| Windows 10, 11 (x64) | `altalk-0.3.0-setup-x64.exe` — установщик, права администратора не нужны |
 | Windows без установки | `altalk-windows-x64.exe` — просто запустить |
-| Ubuntu 22.04+, Debian 12+, Linux Mint 21+ | `sudo apt install ./altalk_0.2.0_amd64.deb` |
-| Fedora, RHEL / AlmaLinux / Rocky 9 | `sudo dnf install ./altalk-0.2.0-1.x86_64.rpm` |
-| Arch, Manjaro | `sudo pacman -U altalk-0.2.0-1-x86_64.pkg.tar.zst` |
+| Ubuntu 22.04+, Debian 12+, Linux Mint 21+ | `sudo apt install ./altalk_0.3.0_amd64.deb` |
+| Fedora, RHEL / AlmaLinux / Rocky 9 | `sudo dnf install ./altalk-0.3.0-1.x86_64.rpm` |
+| Arch, Manjaro | `sudo pacman -U altalk-0.3.0-1-x86_64.pkg.tar.zst` |
 | Любой Linux x86-64 с glibc 2.30+ | `install -m755 altalk-linux-x86_64 ~/.local/bin/altalk && altalk --install` |
 
 При первом запуске откроются настройки — вставь ключ OpenAI. Он хранится в

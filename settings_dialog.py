@@ -1,8 +1,8 @@
 """
 Окно настроек Altalk на GTK 4 + libadwaita (стандартный тулкит GNOME/Ubuntu).
 
-Запускается системным /usr/bin/python3: текущие значения приходят JSON-ом в stdin,
-сохранённые уходят JSON-ом в stdout, так что ключ не попадает в аргументы процесса.
+Запускается системным /usr/bin/python3: текущие значения (и тексты на языке интерфейса) приходят
+JSON-ом в stdin, сохранённые уходят JSON-ом в stdout, так что ключ не попадает в аргументы процесса.
 Код выхода: 0 — сохранено, 1 — отмена, 3 — нет GTK 4/libadwaita.
 """
 
@@ -27,9 +27,9 @@ except (ImportError, ValueError):
     sys.exit(EXIT_UNAVAILABLE)
 
 
-def check_api_key(api_key, model):
+def check_api_key(api_key, model, texts):
     if not api_key:
-        return "Впиши ключ OpenAI"
+        return texts["enter_key"]
     request = urllib.request.Request(
         f"https://api.openai.com/v1/models/{urllib.parse.quote(model)}",
         headers={"Authorization": f"Bearer {api_key}"},
@@ -38,9 +38,9 @@ def check_api_key(api_key, model):
         urllib.request.urlopen(request, timeout=15).close()
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            return "OpenAI не принял ключ — проверь, что он скопирован целиком"
+            return texts["key_rejected"]
         if e.code in (403, 404):
-            return f"Модель {model} недоступна для этого ключа"
+            return texts["model_unavailable"].format(model=model)
     except OSError:
         pass  # offline: save without the check rather than block the user
     return None
@@ -49,7 +49,8 @@ def check_api_key(api_key, model):
 class SettingsWindow(Adw.ApplicationWindow):
     # Only widgets from libadwaita 1.1 / GTK 4.6, so it also runs on Ubuntu 22.04 and Debian 12.
     def __init__(self, app, current):
-        super().__init__(application=app, title="Настройки Altalk", default_width=480, resizable=False)
+        self.texts = texts = current["texts"]
+        super().__init__(application=app, title=texts["dialog_title"], default_width=480, resizable=False)
         self.result = None
 
         self.models = list(current.get("models") or [])
@@ -60,32 +61,41 @@ class SettingsWindow(Adw.ApplicationWindow):
         self.key_entry = Gtk.PasswordEntry(show_peek_icon=True, hexpand=True, valign=Gtk.Align.CENTER)
         self.key_entry.set_text(current.get("key", ""))
         self.key_entry.connect("activate", self.on_save)
-        key_row = Adw.ActionRow(title="Ключ API")
+        key_row = Adw.ActionRow(title=texts["api_key"])
         key_row.add_suffix(self.key_entry)
-        self.model_row = Adw.ComboRow(title="Модель распознавания", model=Gtk.StringList.new(self.models))
+        self.model_row = Adw.ComboRow(title=texts["model"], model=Gtk.StringList.new(self.models))
         self.model_row.set_selected(self.models.index(model))
+        self.languages = current["languages"]
+        language_ids = [language for language, _name in self.languages]
+        self.language_row = Adw.ComboRow(
+            title=texts["speech_language"],
+            model=Gtk.StringList.new([name for _language, name in self.languages]),
+        )
+        if current.get("language") in language_ids:
+            self.language_row.set_selected(language_ids.index(current["language"]))
 
-        group = Adw.PreferencesGroup(title="OpenAI", description=f"Хранится в {current.get('path', '')}")
+        group = Adw.PreferencesGroup(title="OpenAI", description=texts["stored_in"].format(path=current.get("path", "")))
         group.add(key_row)
         group.add(self.model_row)
+        group.add(self.language_row)
 
         self.hotkeys = current.get("hotkeys") or []
         hotkey_ids = [hotkey for hotkey, _name in self.hotkeys]
         self.hotkey_row = Adw.ComboRow(
-            title="Клавиша записи",
-            subtitle="Зажми её и говори",
+            title=texts["hotkey"],
+            subtitle=texts["hotkey_hint"],
             model=Gtk.StringList.new([name for _hotkey, name in self.hotkeys]),
         )
         if current.get("hotkey") in hotkey_ids:
             self.hotkey_row.set_selected(hotkey_ids.index(current["hotkey"]))
         self.autostart_check = Gtk.CheckButton(active=current.get("autostart", False), valign=Gtk.Align.CENTER)
         autostart_row = Adw.ActionRow(
-            title="Добавить в автозапуск",
-            subtitle="Altalk будет запускаться при входе в систему",
+            title=texts["autostart"],
+            subtitle=texts["autostart_hint"],
             activatable_widget=self.autostart_check,
         )
         autostart_row.add_prefix(self.autostart_check)
-        general_group = Adw.PreferencesGroup(title="Общие")
+        general_group = Adw.PreferencesGroup(title=texts["general"])
         general_group.add(self.hotkey_row)
         general_group.add(autostart_row)
 
@@ -93,9 +103,9 @@ class SettingsWindow(Adw.ApplicationWindow):
         page.add(group)
         page.add(general_group)
 
-        cancel_button = Gtk.Button(label="Отмена")
+        cancel_button = Gtk.Button(label=texts["cancel"])
         cancel_button.connect("clicked", lambda _button: self.close())
-        self.save_button = Gtk.Button(label="Сохранить")
+        self.save_button = Gtk.Button(label=texts["save"])
         self.save_button.add_css_class("suggested-action")
         self.save_button.connect("clicked", self.on_save)
         header = Adw.HeaderBar(show_end_title_buttons=False)
@@ -123,16 +133,16 @@ class SettingsWindow(Adw.ApplicationWindow):
         key = self.key_entry.get_text().strip()
         model = self.models[self.model_row.get_selected()]
         self.save_button.set_sensitive(False)
-        self.save_button.set_label("Проверяю…")
+        self.save_button.set_label(self.texts["checking"])
         # The HTTP check runs off the GTK thread so the window keeps redrawing.
         threading.Thread(target=self.check, args=(key, model), daemon=True).start()
 
     def check(self, key, model):
-        GLib.idle_add(self.on_checked, key, model, check_api_key(key, model))
+        GLib.idle_add(self.on_checked, key, model, check_api_key(key, model, self.texts))
 
     def on_checked(self, key, model, error):
         self.save_button.set_sensitive(True)
-        self.save_button.set_label("Сохранить")
+        self.save_button.set_label(self.texts["save"])
         if error:
             self.error_label.set_text(error)
             self.error_label.set_visible(True)
@@ -141,6 +151,7 @@ class SettingsWindow(Adw.ApplicationWindow):
         self.result = {
             "key": key,
             "model": model,
+            "language": self.languages[self.language_row.get_selected()][0],
             "hotkey": self.hotkeys[self.hotkey_row.get_selected()][0],
             "autostart": self.autostart_check.get_active(),
         }
