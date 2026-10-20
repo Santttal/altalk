@@ -6,7 +6,7 @@
 set -eu
 umask 022
 
-VERSION=0.3.0
+VERSION=0.4.0
 MAINTAINER="Andrei Bogdanov <hello@abogdanov.dev>"
 DESCRIPTION="Push-to-talk voice-to-text via OpenAI API"
 root=$(cd "$(dirname "$0")/.." && pwd)
