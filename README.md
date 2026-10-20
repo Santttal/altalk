@@ -95,6 +95,23 @@ macOS собирается только на Mac: `./packaging/build-macos.sh` �
 Из исходников без сборки: `python3 -m pip install -r requirements.txt`, ключ в `.env` рядом
 со скриптом (`cp .env.example .env`), затем `python3 icon2.py`.
 
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org/).
+
+Only Altalk's own Windows files are signed — the installer and the portable `.exe` — built by GitHub
+Actions from the source in this repository. Every release is approved for signing by hand.
+
+- Committers and reviewers: [Andrei Bogdanov](https://github.com/Santttal)
+- Approvers: [Andrei Bogdanov](https://github.com/Santttal)
+
+**Privacy policy.** This program will not transfer any information to other networked systems unless
+specifically requested by the user or the person installing or operating it. Altalk sends to the OpenAI API,
+with the user's own key, only the audio the user records or gives it to transcribe, and checks the key
+when the settings are saved; OpenAI handles that data under its
+[privacy policy](https://openai.com/policies/privacy-policy/). Settings, the log and the transcription
+history stay on the computer.
+
 ## Лицензия
 
 MIT — см. [LICENSE](LICENSE).
