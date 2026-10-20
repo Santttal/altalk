@@ -4,7 +4,10 @@ import os
 
 root = os.path.dirname(SPECPATH)
 version = os.environ["ALTALK_VERSION"]
-icons = ["altalk-tray", "altalk-busy-1", "altalk-busy-2", "altalk-busy-3", "altalk-copied", "altalk-failed", "altalk-256"]
+icons = [
+    "altalk-tray", "altalk-busy-1", "altalk-busy-2", "altalk-busy-3",
+    "altalk-listening-1", "altalk-listening-2", "altalk-listening-3", "altalk-copied", "altalk-failed", "altalk-256",
+]
 
 a = Analysis(
     [os.path.join(root, "icon2.py")],

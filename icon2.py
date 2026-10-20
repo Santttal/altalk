@@ -89,8 +89,12 @@ ICON_PATH = os.path.join(ASSETS_DIR, "altalk-256.png")
 TRAY_ICON_NAME = "altalk-tray"
 COPIED_ICON_NAME = "altalk-copied"
 FAILED_ICON_NAME = "altalk-failed"
-BUSY_ICON_NAMES = ["altalk-busy-1", "altalk-busy-2", "altalk-busy-3"]  # typing dots, cycled
-BUSY_FRAME_SECONDS = 0.4
+# Speech bubbles with dots, cycled: white while the hotkey is held, yellow while transcribing.
+LISTENING_ICON_NAMES = ["altalk-listening-1", "altalk-listening-2", "altalk-listening-3"]
+BUSY_ICON_NAMES = ["altalk-busy-1", "altalk-busy-2", "altalk-busy-3"]
+ANIMATION_FRAME_SECONDS = 0.4
+# Alt+Tab, Ctrl+C and the like press the hotkey too: the listening icon waits this long to skip them.
+LISTENING_ICON_DELAY_SECONDS = 0.3
 COPIED_FLASH_SECONDS = 1.2
 FAILED_FLASH_SECONDS = 3.0
 HISTORY_SIZE = 5
@@ -656,8 +660,9 @@ class OpenAITranscriber:
 
 
 class PushToTalkRecorder:
-    def __init__(self, submit, hotkey):
+    def __init__(self, submit, hotkey, on_listening=lambda listening: None):
         self.submit = submit
+        self.on_listening = on_listening  # called from input threads
         self.recording = False
         self.aborted = False
         self.audio_buffer = []
@@ -669,6 +674,7 @@ class PushToTalkRecorder:
         # Also called by the tray after the settings window saved another key.
         self.key_name, self.keycode = HOTKEYS[hotkey], desktop.HOTKEY_CODES[hotkey]
         self.recording = False
+        self.on_listening(False)
 
     def callback(self, indata, frames, time_info, status):
         if status:
@@ -739,6 +745,7 @@ class PushToTalkRecorder:
                 with self.buffer_lock:
                     self.audio_buffer = []
                 self.microphone_wanted.set()
+                self.on_listening(True)
                 log("Recording started")
         else:
             self.cancel(f"Other key pressed (code {keycode})")
@@ -749,6 +756,7 @@ class PushToTalkRecorder:
             self.aborted = True
             with self.buffer_lock:
                 self.audio_buffer = []
+            self.on_listening(False)
             log(f"{reason} — recording aborted")
 
     def on_release(self, keycode):
@@ -760,7 +768,16 @@ class PushToTalkRecorder:
                     self.audio_buffer = []
             else:
                 log("Recording stopped")
-                threading.Thread(target=self.flush_recording, daemon=True).start()
+                threading.Thread(target=self._finish_recording, daemon=True).start()
+
+    def _finish_recording(self):
+        # Listening ends once the recording is queued or discarded, so the tray goes straight
+        # from the listening icon to the busy one.
+        try:
+            self.flush_recording()
+        finally:
+            if not self.recording:  # unless the next recording has already started
+                self.on_listening(False)
 
 
 class DirectoryAudioEnqueuer:
@@ -938,7 +955,10 @@ class TrayIcon:
         self.loop = None
         self.quit_event = None
         self.restore_icon_handle = None
-        self.busy_task = None
+        self.listening = False
+        self.listening_handle = None
+        self.animation_task = None
+        self.animation_frames = None
         self.on_settings_saved = on_settings_saved
         self.settings_task = None
 
@@ -1015,9 +1035,34 @@ class TrayIcon:
         log(f"Copied from history: {preview_text(text)}")
         self._flash(COPIED_ICON_NAME, COPIED_FLASH_SECONDS)
 
+    def set_listening(self, listening):
+        # Called by the recorder from input threads; the tray lives on the asyncio loop.
+        if self.loop:
+            self.loop.call_soon_threadsafe(self._listening_changed, listening)
+
+    def _listening_changed(self, listening):
+        if self.listening_handle:
+            self.listening_handle.cancel()
+            self.listening_handle = None
+        if listening:
+            self.listening_handle = self.loop.call_later(LISTENING_ICON_DELAY_SECONDS, self._show_listening)
+        elif self.listening:
+            self.listening = False
+            self._refresh_icon()
+
+    def _show_listening(self):
+        self.listening_handle = None
+        self.listening = True
+        if self.restore_icon_handle:  # the check or cross still shown gives way
+            self.restore_icon_handle.cancel()
+            self.restore_icon_handle = None
+        self._refresh_icon()
+
     def _flash(self, name, seconds):
-        # Shown for a moment instead of the busy or idle icon.
-        self._stop_busy_animation()
+        # Shown for a moment instead of the busy or idle icon, but not while listening.
+        if self.listening:
+            return
+        self._stop_animation()
         if self.restore_icon_handle:
             self.restore_icon_handle.cancel()
         self._set_icon(name)
@@ -1028,26 +1073,31 @@ class TrayIcon:
         self._refresh_icon()
 
     def _refresh_icon(self):
-        # Busy while anything is queued or being transcribed, idle (ready) otherwise.
+        # Listening while the hotkey is held, busy while anything is queued or being transcribed,
+        # idle (ready) otherwise.
         if self.restore_icon_handle:
             return  # _end_flash comes back here
         with self.history_lock:
             busy = any(job.state in ("queued", "running") for _, job in self.history)
-        if busy and not self.busy_task:
-            self.busy_task = self.loop.create_task(self._animate_busy())
-        elif not busy:
-            self._stop_busy_animation()
+        frames = LISTENING_ICON_NAMES if self.listening else BUSY_ICON_NAMES if busy else None
+        if frames is None:
+            self._stop_animation()
             self._set_icon(TRAY_ICON_NAME)
+        elif frames is not self.animation_frames:
+            self._stop_animation()
+            self.animation_frames = frames
+            self.animation_task = self.loop.create_task(self._animate(frames))
 
-    def _stop_busy_animation(self):
-        if self.busy_task:
-            self.busy_task.cancel()
-            self.busy_task = None
+    def _stop_animation(self):
+        if self.animation_task:
+            self.animation_task.cancel()
+            self.animation_task = None
+            self.animation_frames = None
 
-    async def _animate_busy(self):
-        for name in itertools.cycle(BUSY_ICON_NAMES):
+    async def _animate(self, frames):
+        for name in itertools.cycle(frames):
             self._set_icon(name)
-            await asyncio.sleep(BUSY_FRAME_SECONDS)
+            await asyncio.sleep(ANIMATION_FRAME_SECONDS)
 
     def _set_icon(self, name):
         if self.icon_name != name:
@@ -1133,7 +1183,7 @@ def main():
         recorder.set_hotkey(read_hotkey())
 
     tray = TrayIcon(transcribe_queue, on_settings_saved=reload_settings)
-    recorder = PushToTalkRecorder(tray.submit, read_hotkey())
+    recorder = PushToTalkRecorder(tray.submit, read_hotkey(), on_listening=tray.set_listening)
 
     threading.Thread(
         target=transcription_worker,

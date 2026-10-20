@@ -17,7 +17,8 @@ from PIL import Image
 
 assets, out = sys.argv[1:]
 tray_sizes = [(16, 16), (20, 20), (24, 24), (32, 32), (40, 40), (48, 48), (64, 64)]
-for name in ("altalk-tray", "altalk-busy-1", "altalk-busy-2", "altalk-busy-3", "altalk-copied", "altalk-failed"):
+for name in ("altalk-tray", "altalk-busy-1", "altalk-busy-2", "altalk-busy-3",
+             "altalk-listening-1", "altalk-listening-2", "altalk-listening-3", "altalk-copied", "altalk-failed"):
     Image.open(f"{assets}/{name}.png").save(f"{out}/{name}.ico", sizes=tray_sizes)
 Image.open(f"{assets}/altalk-256.png").save(f"{out}/altalk.ico", sizes=tray_sizes + [(128, 128), (256, 256)])
 EOF
