@@ -744,7 +744,7 @@ class PushToTalkRecorder:
             self.cancel(f"Other key pressed (code {keycode})")
 
     def cancel(self, reason):
-        # The hotkey was used as a modifier (Ctrl+C, Alt+Tab, Ctrl+click), not to talk.
+        # The hotkey was used as a modifier (Ctrl+C, Alt+Tab), not to talk.
         if self.recording and not self.aborted:
             self.aborted = True
             with self.buffer_lock:

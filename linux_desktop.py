@@ -147,7 +147,7 @@ def copy_to_clipboard(text):
 
 
 def find_input_devices():
-    # Keyboards for the hotkey; mice and touchpads so that a click or a scroll cancels the recording.
+    # Keyboards only: a key pressed while the hotkey is held cancels the recording, the mouse does not.
     devices = []
     for path in list_devices():
         try:
@@ -155,7 +155,7 @@ def find_input_devices():
         except (OSError, PermissionError):
             continue
         keys = d.capabilities().get(ecodes.EV_KEY, [])
-        if any(code in keys for code in (ecodes.KEY_LEFTALT, ecodes.KEY_LEFTCTRL, ecodes.BTN_LEFT)):
+        if any(code in keys for code in (ecodes.KEY_LEFTALT, ecodes.KEY_LEFTCTRL)):
             devices.append(d)
     return devices
 
@@ -163,12 +163,10 @@ def find_input_devices():
 def listen_device(device, recorder):
     try:
         for event in device.read_loop():
-            if event.type == ecodes.EV_REL and event.code in (ecodes.REL_WHEEL, ecodes.REL_HWHEEL):
-                recorder.cancel("Mouse wheel scrolled")
             if event.type != ecodes.EV_KEY:
                 continue
-            if ecodes.BTN_DIGI <= event.code <= ecodes.BTN_TOOL_QUADTAP:
-                continue  # a finger touching the touchpad, not a click
+            if ecodes.BTN_MISC <= event.code < ecodes.KEY_OK:
+                continue  # mouse and touchpad buttons of a keyboard with a touchpad or a combined receiver
             if event.value == 1:
                 recorder.on_press(event.code)
             elif event.value == 0:

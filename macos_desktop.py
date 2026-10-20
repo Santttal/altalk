@@ -41,10 +41,8 @@ MODIFIER_MASKS = {
     58: 0x0020, 61: 0x0040,  # left, right Option
     63: Quartz.kCGEventFlagMaskSecondaryFn,
 }
-MOUSE_DOWN_EVENTS = (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventRightMouseDown, Quartz.kCGEventOtherMouseDown)
-EVENT_MASK = 0
-for _event_type in (Quartz.kCGEventKeyDown, Quartz.kCGEventFlagsChanged, Quartz.kCGEventScrollWheel, *MOUSE_DOWN_EVENTS):
-    EVENT_MASK |= Quartz.CGEventMaskBit(_event_type)
+# Keyboard only: a key pressed while the hotkey is held cancels the recording, the mouse does not.
+EVENT_MASK = Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown) | Quartz.CGEventMaskBit(Quartz.kCGEventFlagsChanged)
 INPUT_ACCESS_POLL_SECONDS = 2.0
 STATUS_ICON_POINTS = 18
 FIELD_WIDTH = 300
@@ -118,10 +116,6 @@ def _on_event(proxy, event_type, event, refcon):
             recorder.on_press(code)  # a modifier went down (or Caps Lock toggled)
     elif event_type == Quartz.kCGEventKeyDown:
         recorder.on_press(Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode))
-    elif event_type in MOUSE_DOWN_EVENTS:
-        recorder.cancel("Mouse button pressed")
-    elif event_type == Quartz.kCGEventScrollWheel:
-        recorder.cancel("Mouse wheel scrolled")
     return event
 
 

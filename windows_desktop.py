@@ -49,13 +49,11 @@ WM_OPEN_SETTINGS = WM_APP + 2
 NIM_ADD, NIM_MODIFY, NIM_DELETE = 0, 1, 2
 NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO = 0x01, 0x02, 0x04, 0x10
 NIIF_USER, NIIF_NOSOUND, NIIF_LARGE_ICON = 0x04, 0x10, 0x20
-RIDEV_REMOVE, RIDEV_INPUTSINK = 0x01, 0x100
+RIDEV_INPUTSINK = 0x100
 RID_INPUT = 0x10000003
-RIM_TYPEMOUSE, RIM_TYPEKEYBOARD = 0, 1
+RIM_TYPEKEYBOARD = 1
 RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1 = 0x01, 0x02, 0x04
-RI_MOUSE_BUTTON_DOWNS = 0x0001 | 0x0004 | 0x0010 | 0x0040 | 0x0100  # left, right, middle, 4, 5
-RI_MOUSE_WHEELS = 0x0400 | 0x0800
-USAGE_PAGE_GENERIC, USAGE_MOUSE, USAGE_KEYBOARD = 0x01, 0x02, 0x06
+USAGE_PAGE_GENERIC, USAGE_KEYBOARD = 0x01, 0x06
 IMAGE_ICON, LR_LOADFROMFILE = 1, 0x10
 SM_CXICON, SM_CXSMICON = 11, 49
 MF_STRING, MF_GRAYED, MF_SEPARATOR = 0x0, 0x1, 0x800
@@ -130,6 +128,7 @@ class RAWMOUSE(ctypes.Structure):
 
 class RAWINPUT(ctypes.Structure):
     class _Data(ctypes.Union):
+        # Only keyboard input is registered; the mouse member keeps the size of Windows' RAWINPUT.
         _fields_ = [("mouse", RAWMOUSE), ("keyboard", RAWKEYBOARD)]
 
     _fields_ = [("header", RAWINPUTHEADER), ("data", _Data)]
@@ -209,12 +208,12 @@ def _icon_path(name):
 
 class Window:
     # A hidden window and its message loop on a thread of their own: the window owns the tray
-    # icon and receives raw keyboard and mouse input, so typing never waits for Python.
+    # icon and receives raw keyboard input, so typing never waits for Python.
     def __init__(self):
         self.recorder = None
         self.tray = None  # icon2.TrayIcon once its icon is shown
         self.icon_shown = False
-        self.mouse_watched = False
+        self.hotkey_watched = False
         self.icons = {}
         self.hwnd = None
         self.taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
@@ -240,7 +239,7 @@ class Window:
             user32.DispatchMessageW(ctypes.byref(msg))
 
     def _register_raw_input(self, usage, flags):
-        device = RAWINPUTDEVICE(USAGE_PAGE_GENERIC, usage, flags, None if flags & RIDEV_REMOVE else self.hwnd)
+        device = RAWINPUTDEVICE(USAGE_PAGE_GENERIC, usage, flags, self.hwnd)
         if not user32.RegisterRawInputDevices(ctypes.byref(device), 1, ctypes.sizeof(device)):
             app.log(f"RegisterRawInputDevices failed: error {ctypes.get_last_error()}")
 
@@ -300,22 +299,14 @@ class Window:
                     # Only a hold long enough to be a recording: a short tap of Alt
                     # still opens the menu bar, as Windows users expect.
                     user32.SetTimer(self.hwnd, MENU_MASK_TIMER, int(app.MIN_DURATION_SECONDS * 1000), None)
-        elif data.header.dwType == RIM_TYPEMOUSE:
-            flags = data.data.mouse.usButtonFlags
-            if flags & RI_MOUSE_BUTTON_DOWNS:
-                recorder.cancel("Mouse button pressed")
-            elif flags & RI_MOUSE_WHEELS:
-                recorder.cancel("Mouse wheel scrolled")
         self._follow_recording()
 
     def _follow_recording(self):
-        # The mouse matters only while the hotkey is held; mouse moves are not worth a
-        # Python call each the rest of the time.
+        # While recording, check now and then that the hotkey is still held (see _check_hotkey_held).
         recording = self.recorder.recording
-        if recording == self.mouse_watched:
+        if recording == self.hotkey_watched:
             return
-        self.mouse_watched = recording
-        self._register_raw_input(USAGE_MOUSE, RIDEV_INPUTSINK if recording else RIDEV_REMOVE)
+        self.hotkey_watched = recording
         if recording:
             user32.SetTimer(self.hwnd, KEY_WATCH_TIMER, KEY_WATCH_MILLISECONDS, None)
         else:
