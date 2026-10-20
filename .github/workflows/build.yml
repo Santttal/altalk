@@ -54,9 +54,13 @@ jobs:
           grep -q "Tray icon registered" "$log"
       - name: Hold Left Option with a click and a scroll, then with a key pressed
         run: |
+          # With a key the settings window stays closed, so the click lands on the desktop: a click
+          # in its key field would turn on secure input, which hides keystrokes from Altalk.
+          mkdir -p ~/Library/Application\ Support/Altalk
+          echo OPENAI_API_KEY=sk-placeholder > ~/Library/Application\ Support/Altalk/.env
           build/macos/dist/Altalk.app/Contents/MacOS/altalk &
           sleep 15
-          build/macos/venv/bin/python packaging/macos/press-keys.py
+          build/macos/venv/bin/python packaging/macos/press-keys.py "screenshots/listening-${{ matrix.runner }}.png"
           sleep 5
           kill $! && wait $! || true
           tail -n 12 ~/Library/Logs/Altalk/altalk.log

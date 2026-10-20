@@ -1,6 +1,9 @@
 # CI check of the macOS hotkey: posts Left Option held for 1.5 s with a mouse click and a scroll in
 # between (the recording goes on), then Left Option with the A key pressed in between (it is cancelled),
-# as if from the keyboard and the mouse. The app log shows what Altalk made of them.
+# as if from the keyboard and the mouse. The app log shows what Altalk made of them; the screenshot
+# taken during the first hold, the listening icon.
+import subprocess
+import sys
 import time
 
 import Quartz
@@ -32,7 +35,9 @@ def post_click_and_scroll():
 post_option(OPTION_DOWN)
 time.sleep(0.5)
 post_click_and_scroll()
-time.sleep(1)
+time.sleep(0.5)
+subprocess.run(["screencapture", "-x", sys.argv[1]])
+time.sleep(0.5)
 post_option(OPTION_UP)
 time.sleep(1)
 post_option(OPTION_DOWN)
